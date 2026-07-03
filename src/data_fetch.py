@@ -98,6 +98,7 @@ def buscar_linha(df: pd.DataFrame, nomes_possiveis: list[str], coluna=None):
 def buscar_info_cadastral(ticker_obj: yf.Ticker) -> dict:
     """Extrai os campos cadastrais relevantes de .info, com defaults seguros."""
     info = ticker_obj.info
+    datas_resultado = buscar_datas_resultado(ticker_obj)
     return {
         "nome": info.get("longName") or info.get("shortName") or ticker_obj.ticker,
         "setor": info.get("sector", "N/A"),
@@ -111,7 +112,64 @@ def buscar_info_cadastral(ticker_obj: yf.Ticker) -> dict:
         # Moeda em que as DEMONSTRAÇÕES FINANCEIRAS são reportadas — pode ser
         # diferente da moeda de negociação (ver obter_taxa_cambio_para_usd).
         "moeda_financeira": info.get("financialCurrency", info.get("currency", "USD")),
+        "ultima_divulgacao_resultado": datas_resultado["ultima_divulgacao"],
+        "proxima_divulgacao_resultado": datas_resultado["proxima_divulgacao"],
     }
+
+
+def buscar_datas_resultado(ticker_obj: yf.Ticker) -> dict:
+    """
+    Busca a data da última divulgação de resultado já ocorrida e da próxima
+    prevista, via calendário de earnings do yfinance.
+
+    Por quê isso importa: os fundamentos (financials/balance/cashflow) só
+    mudam de verdade quando a empresa divulga um resultado novo (~4x por
+    ano). Guardamos essas datas para `precisa_atualizar_fundamentos` decidir
+    se vale a pena bater na API de novo, ou se o que já está no banco ainda
+    é válido — isso é literalmente o "pipeline de acompanhamento de
+    resultados corporativos" mencionado na descrição da vaga.
+    """
+    try:
+        datas = ticker_obj.get_earnings_dates(limit=8)
+        if datas is None or datas.empty:
+            return {"ultima_divulgacao": None, "proxima_divulgacao": None}
+
+        agora = pd.Timestamp.now(tz=datas.index.tz)
+        passadas = datas.index[datas.index <= agora]
+        futuras = datas.index[datas.index > agora]
+
+        ultima = str(passadas.max().date()) if len(passadas) else None
+        proxima = str(futuras.min().date()) if len(futuras) else None
+        return {"ultima_divulgacao": ultima, "proxima_divulgacao": proxima}
+    except Exception as erro:
+        warnings.warn(f"Não foi possível buscar datas de divulgação de resultado: {erro}")
+        return {"ultima_divulgacao": None, "proxima_divulgacao": None}
+
+
+def precisa_atualizar_fundamentos(conn, ticker: str) -> bool:
+    """
+    Decide se vale a pena rebuscar financials/balance_sheet/cashflow via
+    API, ou se os dados já salvos no banco ainda são válidos.
+
+    Regra: só precisa atualizar se
+      (a) a empresa nunca foi buscada antes, OU
+      (b) a "última divulgação de resultado" conhecida é diferente da que
+          está salva (ou seja, saiu um resultado novo desde a última busca).
+
+    Isso evita bater na API de fundamentos toda vez que o dashboard roda —
+    eles só mudam ~4x por ano. Preço e câmbio continuam sendo atualizados
+    sempre (são baratos e mudam todo dia).
+    """
+    estado = db.buscar_estado_empresa(conn, ticker)
+    if estado is None:
+        return True
+
+    _, ultima_divulgacao_salva = estado
+    if ultima_divulgacao_salva is None:
+        return True
+
+    datas_atuais = buscar_datas_resultado(yf.Ticker(ticker))
+    return datas_atuais["ultima_divulgacao"] != ultima_divulgacao_salva
 
 
 def obter_taxa_cambio_para_usd(moeda_origem: str) -> float:
@@ -195,11 +253,16 @@ def buscar_dados_empresa(ticker: str) -> dict:
     }
 
 
-def buscar_todas_as_empresas(tickers: list[str] = config.TICKERS) -> dict:
+def buscar_todas_as_empresas(tickers: list[str] = config.TICKERS, forcar_atualizacao: bool = False) -> dict:
     """
-    Orquestrador: busca preços (1 chamada) + dados fundamentalistas
-    (1 chamada por ticker, pois .info/.financials não suportam batch) de
-    todas as empresas do projeto, e persiste tudo no SQLite.
+    Orquestrador: busca preços (1 chamada, sempre) + dados fundamentalistas
+    (1 chamada por ticker, só quando necessário) de todas as empresas do
+    projeto, e persiste tudo no SQLite.
+
+    Preço e câmbio são sempre atualizados (são baratos e mudam todo dia).
+    Fundamentos (financials/balance/cashflow) só são rebuscados se saiu um
+    resultado novo desde a última vez (ver `precisa_atualizar_fundamentos`),
+    ou se `forcar_atualizacao=True` (útil para forçar um refresh manual).
 
     Retorna um dict {ticker: dados_empresa} para uso imediato (ex: DCF),
     além de já ter salvo tudo em /data/valuation.db.
@@ -211,11 +274,21 @@ def buscar_todas_as_empresas(tickers: list[str] = config.TICKERS) -> dict:
 
     with db.conectar() as conn:
         for ticker in tickers:
-            print(f"Buscando dados de {ticker}...")
+            precos_ticker = _extrair_dataframe_completo(precos_brutos, ticker)
+
+            # precos_historicos tem FOREIGN KEY para empresas(ticker), então
+            # só podemos salvar o preço depois de garantir que a empresa já
+            # existe no banco (o que só acontece na primeira busca).
+            if not forcar_atualizacao and not precisa_atualizar_fundamentos(conn, ticker):
+                db.salvar_precos(conn, ticker, precos_ticker)  # preço: sempre atualiza
+                print(f"{ticker}: sem resultado novo desde a última busca — "
+                      f"mantendo fundamentos salvos, só atualizando preço.")
+                continue
+
+            print(f"Buscando fundamentos de {ticker} (primeira busca ou resultado novo disponível)...")
             dados = buscar_dados_empresa(ticker)
             resultado[ticker] = dados
 
-            # Salva cadastro
             db.salvar_empresa(conn, {
                 "ticker": ticker,
                 "nome": dados["info"]["nome"],
@@ -226,11 +299,10 @@ def buscar_todas_as_empresas(tickers: list[str] = config.TICKERS) -> dict:
                 "market_cap": dados["info"]["market_cap"],
                 "shares_outstanding": dados["info"]["shares_outstanding"],
                 "atualizado_em": datetime.now(timezone.utc).isoformat(),
+                "ultima_divulgacao_resultado": dados["info"]["ultima_divulgacao_resultado"],
+                "proxima_divulgacao_resultado": dados["info"]["proxima_divulgacao_resultado"],
             })
-
-            # Salva o OHLCV completo deste ticker (recortado do download em lote)
-            precos_ticker = _extrair_dataframe_completo(precos_brutos, ticker)
-            db.salvar_precos(conn, ticker, precos_ticker)
+            db.salvar_precos(conn, ticker, precos_ticker)  # preço: sempre atualiza
 
             # Salva as 3 demonstrações no formato long
             db.salvar_linhas_financeiras(conn, ticker, "financials", dados["financials"])
@@ -242,10 +314,19 @@ def buscar_todas_as_empresas(tickers: list[str] = config.TICKERS) -> dict:
 
 
 if __name__ == "__main__":
-    # Execução direta: busca tudo e imprime um resumo de checagem por ticker.
-    dados = buscar_todas_as_empresas()
-    for ticker in config.TICKERS:
-        info = dados[ticker]["info"]
-        print(f"\n{ticker}: {info['nome']} | {info['setor']} / {info['industria']} "
-              f"| beta={info['beta']} | preço atual={info['preco_atual']}")
+    # Execução direta: busca tudo (respeitando o cache de fundamentos) e
+    # imprime um resumo lendo direto do banco — assim reflete o estado real
+    # mesmo para tickers cujos fundamentos foram pulados nesta rodada.
+    buscar_todas_as_empresas()
+
+    with db.conectar() as conn:
+        print(f"\n{'Ticker':<7}{'Nome':<38}{'Setor':<24}{'Beta':>6}  Próx. resultado")
+        for ticker in config.TICKERS:
+            cur = conn.execute("""
+                SELECT nome, setor, beta, proxima_divulgacao_resultado
+                FROM empresas WHERE ticker = ?
+            """, (ticker,))
+            nome, setor, beta, proxima = cur.fetchone()
+            print(f"{ticker:<7}{nome:<38}{setor:<24}{beta:>6.2f}  {proxima or 'N/A'}")
+
     print(f"\nBanco salvo em: {config.CAMINHO_BANCO_SQLITE}")

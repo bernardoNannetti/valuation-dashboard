@@ -138,7 +138,12 @@ def calcular_wacc(conn, ticker: str) -> dict:
     taxa_imposto = taxa_imposto_efetiva(conn, ticker)
     custo_divida_pos_imposto = custo_divida_pre_imposto * (1 - taxa_imposto)
 
-    valor_equity = empresa["market_cap"]
+    # Valor de mercado do equity = preço atual × ações em circulação, em vez
+    # do market_cap salvo em `empresas` (que só é atualizado quando os
+    # fundamentos são rebuscados). Isso mantém o peso do WACC reagindo ao
+    # preço de todo dia, mesmo quando os fundamentos ficam em cache entre
+    # divulgações de resultado (ver precisa_atualizar_fundamentos).
+    valor_equity = preco_atual(conn, ticker) * empresa["shares_outstanding"]
     valor_total = valor_equity + divida_total
     peso_equity = valor_equity / valor_total
     peso_divida = divida_total / valor_total
