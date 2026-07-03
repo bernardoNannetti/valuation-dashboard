@@ -108,18 +108,55 @@ def buscar_info_cadastral(ticker_obj: yf.Ticker) -> dict:
         "market_cap": info.get("marketCap"),
         "shares_outstanding": info.get("sharesOutstanding"),
         "moeda": info.get("currency", "USD"),
+        # Moeda em que as DEMONSTRAÇÕES FINANCEIRAS são reportadas — pode ser
+        # diferente da moeda de negociação (ver obter_taxa_cambio_para_usd).
+        "moeda_financeira": info.get("financialCurrency", info.get("currency", "USD")),
     }
+
+
+def obter_taxa_cambio_para_usd(moeda_origem: str) -> float:
+    """
+    Fator de conversão de `moeda_origem` para USD (1 unidade de moeda_origem
+    em USD). Necessário porque ADRs negociam em USD na bolsa americana, mas
+    reportam as demonstrações financeiras na moeda do país de origem.
+
+    Descoberto testando a Etapa 3: a TSM reporta em TWD (New Taiwan Dollar).
+    Sem essa conversão, o DCF misturava receita/EBIT em TWD com market cap/
+    preço em USD, gerando um preço-alvo ~30x maior que o real.
+    """
+    if moeda_origem == "USD":
+        return 1.0
+    try:
+        par_cambial = yf.Ticker(f"{moeda_origem}USD=X")
+        historico = par_cambial.history(period="5d")
+        if historico.empty:
+            raise ValueError("histórico de câmbio vazio")
+        return float(historico["Close"].iloc[-1])
+    except Exception as erro:
+        fallback_moeda_por_usd = config.FX_FALLBACK_PARA_USD.get(moeda_origem)
+        if fallback_moeda_por_usd is None:
+            warnings.warn(
+                f"Sem taxa de câmbio {moeda_origem}->USD (ao vivo falhou: {erro}) "
+                f"e sem fallback configurado em config.FX_FALLBACK_PARA_USD. "
+                f"Usando fator 1.0 (SEM CONVERSÃO) — revise manualmente."
+            )
+            return 1.0
+        fator = 1.0 / fallback_moeda_por_usd
+        print(f"[aviso] Câmbio {moeda_origem}->USD ao vivo indisponível ({erro}). "
+              f"Usando fallback: 1 {moeda_origem} = {fator:.5f} USD")
+        return fator
 
 
 def buscar_dados_empresa(ticker: str) -> dict:
     """
     Busca o "pacote completo" de dados de UMA empresa: cadastro + as 3
-    demonstrações financeiras (financials, balance_sheet, cashflow).
+    demonstrações financeiras (financials, balance_sheet, cashflow), já
+    convertidas para USD quando a empresa reporta em outra moeda (ADRs).
 
     Retorna um dict com:
       - 'ticker', 'info' (dict cadastral)
-      - 'financials', 'balance_sheet', 'cashflow' (DataFrames brutos,
-        para salvar no banco e para o DCF usar como quiser)
+      - 'financials', 'balance_sheet', 'cashflow' (DataFrames em USD,
+        prontos para salvar no banco e para o DCF usar diretamente)
     """
     ticker_obj = yf.Ticker(ticker)
 
@@ -135,6 +172,19 @@ def buscar_dados_empresa(ticker: str) -> dict:
             f"Isso pode acontecer com ADRs (ex: TSM) que reportam com atraso "
             f"ou em formato diferente. Vale checar manualmente."
         )
+
+    # Converte para USD se a empresa reporta as financeiras em outra moeda
+    # (ex: TSM em TWD). market_cap/shares/preço já vêm em USD do próprio
+    # yfinance, então só as 3 demonstrações precisam de conversão.
+    moeda_financeira = info["moeda_financeira"]
+    moeda_negociacao = info["moeda"]
+    if moeda_financeira != moeda_negociacao:
+        fator = obter_taxa_cambio_para_usd(moeda_financeira)
+        print(f"[{ticker}] Convertendo demonstrações financeiras de {moeda_financeira} "
+              f"para {moeda_negociacao} (fator: {fator:.5f})")
+        financials = financials * fator
+        balance_sheet = balance_sheet * fator
+        cashflow = cashflow * fator
 
     return {
         "ticker": ticker,
