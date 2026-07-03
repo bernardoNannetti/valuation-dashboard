@@ -79,9 +79,17 @@ def preco_atual(conn, ticker: str) -> float:
 def taxa_livre_de_risco() -> float:
     """
     Busca o yield atual do Treasury 10Y (ticker ^TNX) ao vivo.
-    O yfinance reporta o índice TNX de forma que preço = yield% × 10
-    (ex: preço 44.90 ⇒ yield de 4,49%), então dividimos por 1000 para
-    chegar à taxa em fração decimal (0,0449).
+    O yfinance reporta o Close do ^TNX diretamente em pontos percentuais de
+    yield (ex: Close 4.372 ⇒ yield de 4,372%), então dividimos por 100 para
+    chegar à taxa em fração decimal (0,04372).
+
+    BUG CORRIGIDO: a versão anterior dividia por 1000, presumindo que o
+    yfinance reportava o índice como yield% × 10 (ex: "44.90" para 4,49%).
+    Essa premissa nunca foi checada contra dado real — o valor bruto atual
+    é 4.372, não 43.72 — e vinha subestimando a taxa livre de risco em 10x
+    (0,44% em vez de ~4,4%) desde que o modelo de DCF foi criado. Isso
+    derrubava o WACC inteiro em ~4 p.p., inflando artificialmente todo
+    preço-alvo calculado até agora (WACC menor = valor presente maior).
 
     Se não houver conexão com a internet (ex: ambiente sandboxed sem acesso
     a APIs financeiras), cai para o valor de referência salvo em config.
@@ -90,7 +98,7 @@ def taxa_livre_de_risco() -> float:
         historico = yf.Ticker(config.TICKER_TAXA_LIVRE_DE_RISCO).history(period="5d")
         if historico.empty:
             raise ValueError("histórico vazio")
-        return float(historico["Close"].iloc[-1]) / 1000
+        return float(historico["Close"].iloc[-1]) / 100
     except Exception as erro:
         print(f"[aviso] Não foi possível buscar Treasury 10Y ao vivo ({erro}). "
               f"Usando fallback: {config.TAXA_LIVRE_DE_RISCO_FALLBACK:.2%}")

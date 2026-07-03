@@ -159,6 +159,19 @@ THRESHOLD_VENDA = -0.15   # upside < -15% => Venda
 # entre os dois => Neutro
 
 # ---------------------------------------------------------------------------
+# Benchmark de mercado (linha de referência no gráfico comparativo)
+# ---------------------------------------------------------------------------
+# NÃO é uma ação do projeto: nunca entra em TICKERS, então nunca aparece na
+# tabela de recomendações, no DCF ou no comps_analysis — é usado só como uma
+# linha extra (tracejada) no gráfico comparativo de retorno, pra dar
+# contexto de "essa ação bateu ou perdeu do índice" (padrão em qualquer
+# dashboard de research/portfolio de verdade). Precisa ser buscado via
+# data_fetch.baixar_benchmark() (yfinance, só roda via Claude Code — mesma
+# limitação de rede do resto do projeto).
+TICKER_BENCHMARK = "^GSPC"
+NOME_BENCHMARK = "S&P 500"
+
+# ---------------------------------------------------------------------------
 # Caminhos de arquivos
 # ---------------------------------------------------------------------------
 import os

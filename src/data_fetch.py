@@ -253,6 +253,63 @@ def buscar_dados_empresa(ticker: str) -> dict:
     }
 
 
+def baixar_benchmark(ticker: str = None, anos: int = config.ANOS_HISTORICO_PRECO) -> pd.DataFrame:
+    """
+    Baixa o histórico de preços do benchmark de mercado (S&P 500, ^GSPC por
+    padrão) e salva na MESMA tabela precos_historicos usada pelas 6 ações
+    do projeto — assim returns_chart.py consegue plotá-lo como uma linha
+    extra (tracejada) no gráfico comparativo, sem duplicar lógica.
+
+    ^GSPC nunca entra em config.TICKERS, então nunca aparece na tabela de
+    recomendações, no DCF ou no comps_analysis — é usado só como referência
+    visual no gráfico.
+
+    Como precos_historicos tem FOREIGN KEY para empresas(ticker), primeiro
+    garantimos uma linha "cadastral" mínima pro benchmark (não é uma
+    empresa de verdade, então a maioria dos campos fica None — beta,
+    market_cap e shares_outstanding não fazem sentido pra um índice).
+
+    Chame isso via Claude Code (yfinance precisa de acesso à internet, que
+    o sandbox do Cowork não tem) — ver atualizar_tudo.py, que já chama isso
+    como parte do passo 1.
+    """
+    ticker = ticker or config.TICKER_BENCHMARK
+    historico = yf.Ticker(ticker).history(period=f"{anos}y", auto_adjust=True)
+    if historico.empty:
+        raise RuntimeError(f"Download de preços do benchmark {ticker} retornou vazio.")
+
+    df_precos = pd.DataFrame({
+        "Close": historico["Close"],
+        "High": historico["High"],
+        "Low": historico["Low"],
+        "Open": historico["Open"],
+        "Volume": historico["Volume"],
+    }).dropna()
+
+    with db.conectar() as conn:
+        db.salvar_empresa(conn, {
+            "ticker": ticker,
+            "nome": config.NOME_BENCHMARK,
+            "setor": "Índice",
+            "industria": "Índice de mercado",
+            "descricao": (
+                f"Benchmark de mercado ({config.NOME_BENCHMARK}) — usado só como linha de "
+                f"referência no gráfico comparativo de retorno, não entra no DCF/comps "
+                f"(não é uma ação individual do projeto)."
+            ),
+            "beta": None,
+            "market_cap": None,
+            "shares_outstanding": None,
+            "preco_no_cadastro": None,
+            "atualizado_em": datetime.now(timezone.utc).isoformat(),
+            "ultima_divulgacao_resultado": None,
+            "proxima_divulgacao_resultado": None,
+        })
+        db.salvar_precos(conn, ticker, df_precos)
+
+    return df_precos
+
+
 def buscar_todas_as_empresas(tickers: list[str] = config.TICKERS, forcar_atualizacao: bool = False) -> dict:
     """
     Orquestrador: busca preços (1 chamada, sempre) + dados fundamentalistas
@@ -319,6 +376,9 @@ if __name__ == "__main__":
     # imprime um resumo lendo direto do banco — assim reflete o estado real
     # mesmo para tickers cujos fundamentos foram pulados nesta rodada.
     buscar_todas_as_empresas()
+
+    print(f"Buscando benchmark ({config.TICKER_BENCHMARK} / {config.NOME_BENCHMARK})...")
+    baixar_benchmark()
 
     with db.conectar() as conn:
         print(f"\n{'Ticker':<7}{'Nome':<38}{'Setor':<24}{'Beta':>6}  Próx. resultado")

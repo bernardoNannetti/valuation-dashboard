@@ -29,25 +29,26 @@ import plotly.graph_objects as go
 
 from . import config
 
-# 6 cores distintas e com bom contraste entre si (paleta qualitativa)
-CORES = {
-    "AAPL": "#1f77b4",
-    "MSFT": "#ff7f0e",
-    "AMZN": "#2ca02c",
-    "NVDA": "#d62728",
-    "GOOGL": "#9467bd",
-    "TSM": "#8c564b",
-}
 
-
-def carregar_precos_do_banco(tickers: list = None) -> pd.DataFrame:
+def carregar_precos_do_banco(tickers: list = None, incluir_benchmark: bool = True) -> pd.DataFrame:
     """
     Lê o histórico de preços (Close) de todos os tickers direto do SQLite —
     já foi baixado pelo data_fetch.py, então não faz nenhuma chamada nova
     de API. Retorna um DataFrame largo: índice = data, colunas = ticker.
+
+    `incluir_benchmark`: acrescenta config.TICKER_BENCHMARK (S&P 500) como
+    última coluna, pra virar uma linha extra de referência no gráfico (ver
+    construir_grafico_comparativo). Se o benchmark ainda não foi buscado
+    (data_fetch.baixar_benchmark() nunca rodou), a coluna volta vazia e é
+    ignorada silenciosamente — não quebra o gráfico das 6 ações.
     """
     if tickers is None:
-        tickers = config.TICKERS
+        tickers = list(config.TICKERS)
+    else:
+        tickers = list(tickers)
+
+    if incluir_benchmark and config.TICKER_BENCHMARK not in tickers:
+        tickers = tickers + [config.TICKER_BENCHMARK]
 
     conn = sqlite3.connect(config.CAMINHO_BANCO_SQLITE)
     partes = {}
@@ -107,85 +108,172 @@ def _janelas_de_data(precos: pd.DataFrame) -> dict:
     return {label: max(data_inicio, data_minima) for label, data_inicio in brutas.items()}
 
 
-def construir_grafico_comparativo(precos: pd.DataFrame) -> go.Figure:
-    """
-    Monta o gráfico com 4 botões (YTD/12M/24M/36M). Cada janela é
-    RENORMALIZADA para base 100 no seu próprio primeiro dia (padrão de
-    mercado — Yahoo/Google Finance) e pré-calculada em memória; os botões
-    só trocam qual conjunto de x/y fica visível nas linhas (Plotly
-    `update`), então a troca de aba não recalcula nada nem chama API.
+JANELA_INICIAL = "36M"
 
-    `precos`: DataFrame de preços BRUTOS (não normalizados), uma coluna por
-    ticker — a normalização é feita aqui, uma vez por janela.
+# Paleta refinada para as 6 linhas do gráfico — reaproveitada também para os
+# "dots" coloridos de cada ticker na tabela de recomendações do dashboard
+# (returns_chart.CORES), pra manter a mesma linguagem visual nos dois
+# lugares. Trocamos da paleta "qualitativa" padrão do Plotly (tons meio
+# datados de tab10/matplotlib) por uma paleta mais alinhada ao visual do
+# dashboard.html (ver dashboard_export.py).
+CORES = {
+    "AAPL": "#2E6FE0",   # azul (cor de destaque do dashboard)
+    "MSFT": "#12B76A",   # verde
+    "AMZN": "#F79009",   # laranja
+    "NVDA": "#7A5AF8",   # violeta
+    "GOOGL": "#D6409F",  # magenta
+    "TSM": "#667085",    # slate
+    config.TICKER_BENCHMARK: "#111827",  # quase preto — neutro, não compete com as 6 cores acima
+}
+
+# Nome de exibição por ticker (legenda/tooltip) — só o benchmark precisa de
+# tradução (^GSPC -> "S&P 500"); os outros usam o próprio ticker.
+NOMES_EXIBICAO = {config.TICKER_BENCHMARK: config.NOME_BENCHMARK}
+
+
+def nome_exibicao(ticker: str) -> str:
+    return NOMES_EXIBICAO.get(ticker, ticker)
+
+
+def calcular_dados_por_janela(precos: pd.DataFrame) -> dict:
+    """
+    Pré-calcula, para cada janela (YTD/12M/24M/36M) e cada ticker, a série
+    de retorno % já formatada (x = datas, y = valores, text = string
+    pronta em pt-BR) — estrutura compartilhada tanto pelos botões nativos
+    do Plotly (construir_grafico_comparativo) quanto pelos botões HTML
+    customizados usados no dashboard.html (ver dashboard_export.py), que
+    chamam `Plotly.update` diretamente em JS com esses dados.
     """
     janelas = _janelas_de_data(precos)
     tickers = list(precos.columns)
 
-    # Pré-calcula o retorno % de cada janela, para cada ticker.
     dados_por_janela = {}
     for label, data_inicio in janelas.items():
         recorte = precos.loc[data_inicio:]
-        dados_por_janela[label] = calcular_retorno_percentual(recorte)
+        retorno = calcular_retorno_percentual(recorte)
+        dados_por_janela[label] = {}
+        for ticker in tickers:
+            serie = retorno[ticker].dropna()
+            dados_por_janela[label][ticker] = {
+                "x": [d.strftime("%Y-%m-%d") for d in serie.index],
+                "y": [round(float(v), 4) for v in serie.values],
+                "text": [formatar_retorno_br(v) for v in serie.values],
+            }
+    return dados_por_janela
+
+
+def construir_grafico_comparativo(precos: pd.DataFrame, modo_standalone: bool = True) -> go.Figure:
+    """
+    Monta o gráfico comparativo de retorno. Cada janela (YTD/12M/24M/36M) é
+    RENORMALIZADA para base 100 no seu próprio primeiro dia (padrão de
+    mercado — Yahoo/Google Finance) e pré-calculada em memória — a troca de
+    janela nunca recalcula nada nem chama API de novo.
+
+    `modo_standalone`: True (padrão) monta o gráfico "completo" — com
+    título, rótulos de eixo e os botões nativos do Plotly — usado quando o
+    gráfico é aberto sozinho (grafico_comparativo.html, ver
+    salvar_grafico_html). No dashboard.html usamos `modo_standalone=False`:
+    sem título/rótulos (o card já tem título) e SEM os botões nativos do
+    Plotly (que têm um visual "engessado", tipo formulário, difícil de
+    restilizar via CSS porque são desenhados como SVG) — no lugar, o
+    dashboard usa botões HTML customizados no mesmo estilo do resto do
+    site, que chamam Plotly.update() diretamente com os dados de
+    calcular_dados_por_janela().
+
+    `precos`: DataFrame de preços BRUTOS (não normalizados), uma coluna por
+    ticker — a normalização é feita aqui, uma vez por janela.
+    """
+    tickers = list(precos.columns)
+    dados_por_janela = calcular_dados_por_janela(precos)
 
     fig = go.Figure()
-
-    # Janela inicial exibida ao abrir o gráfico: 36M (visão completa).
-    janela_inicial = "36M"
     for ticker in tickers:
-        serie = dados_por_janela[janela_inicial][ticker].dropna()
-        textos = [formatar_retorno_br(v) for v in serie.values]
+        serie = dados_por_janela[JANELA_INICIAL][ticker]
+        eh_benchmark = ticker == config.TICKER_BENCHMARK
+        # Benchmark fica visualmente "atrás" das 6 ações: linha mais fina,
+        # tracejada e num tom neutro — é referência, não é uma das ações
+        # que estamos analisando, não deveria competir visualmente com elas.
         fig.add_trace(go.Scatter(
-            x=serie.index,
-            y=serie.values,
+            x=serie["x"],
+            y=serie["y"],
             mode="lines",
-            name=ticker,
-            line=dict(color=CORES.get(ticker), width=2),
-            text=textos,
-            hovertemplate=f"<b>{ticker}</b><br>%{{x|%d/%m/%Y}}<br>Retorno: %{{text}}<extra></extra>",
+            name=nome_exibicao(ticker),
+            line=dict(
+                color=CORES.get(ticker),
+                width=1.5 if eh_benchmark else 2.25,
+                dash="dot" if eh_benchmark else "solid",
+            ),
+            text=serie["text"],
+            hovertemplate=f"<b>{nome_exibicao(ticker)}</b><br>%{{x|%d/%m/%Y}}<br>Retorno: %{{text}}<extra></extra>",
         ))
 
-    botoes = []
-    for label in janelas:
-        xs = [dados_por_janela[label][ticker].dropna().index for ticker in tickers]
-        ys = [dados_por_janela[label][ticker].dropna().values for ticker in tickers]
-        textos_por_ticker = [[formatar_retorno_br(v) for v in y] for y in ys]
-        botoes.append(dict(
-            label=label,
-            method="update",
-            args=[{"x": xs, "y": ys, "text": textos_por_ticker}],
-        ))
-
-    fig.update_layout(
-        title="Retorno comparativo — AAPL, MSFT, AMZN, NVDA, GOOGL, TSM",
-        xaxis_title="Data",
-        yaxis_title="Retorno acumulado no período selecionado (%)",
+    layout = dict(
         # separators=",." -> primeiro caractere é o separador decimal, o
         # segundo o de milhar. Padrão brasileiro: "14,10" em vez de "14.10".
         # Isso afeta os ticks do eixo E o hovertemplate (ambos usam d3-format).
         separators=",.",
+        # Fundo transparente: no dashboard.html o gráfico fica dentro de um
+        # card branco (var(--card)) — deixando paper/plot transparentes ele
+        # se funde no card em vez de desenhar seu próprio retângulo branco
+        # por cima (o que ficava com uma "borda" visível e um ar mais
+        # "engessado", de formulário, separado do resto do layout).
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter, -apple-system, BlinkMacSystemFont, sans-serif", size=12.5, color="#475467"),
         # hoverformat é necessário além do tickformat: com hovermode="x
         # unified", o Plotly usa o hoverformat do eixo (não o hovertemplate
         # de cada linha) para formatar o valor mostrado no tooltip unificado.
-        yaxis=dict(ticksuffix="%", tickformat=".2f", hoverformat=".2f"),
+        yaxis=dict(
+            ticksuffix="%", tickformat=".2f", hoverformat=".2f",
+            gridcolor="#EEF1F6", gridwidth=1, zeroline=True,
+            zerolinecolor="#DDE2EA", zerolinewidth=1,
+            tickfont=dict(color="#98A2B3", size=11.5),
+            showline=False,
+        ),
+        xaxis=dict(
+            showgrid=False, showline=True, linecolor="#E5E9F0",
+            tickfont=dict(color="#98A2B3", size=11.5),
+            showspikes=True, spikemode="across", spikesnap="cursor",
+            spikethickness=1, spikedash="dot", spikecolor="#98A2B3",
+        ),
         hovermode="x unified",
-        template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        updatemenus=[dict(
-            type="buttons",
-            direction="right",
-            buttons=botoes,
-            x=0, y=1.15, xanchor="left", yanchor="top",
-            showactive=True,
-            active=list(janelas.keys()).index(janela_inicial),
-        )],
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+            font=dict(size=12, color="#475467"), bgcolor="rgba(0,0,0,0)",
+        ),
+        margin=dict(l=48, r=16, t=16, b=36),
     )
+
+    if modo_standalone:
+        layout["title"] = dict(
+            text="Retorno comparativo — AAPL, MSFT, AMZN, NVDA, GOOGL, TSM",
+            font=dict(size=15),
+        )
+        layout["xaxis"]["title"] = "Data"
+        layout["yaxis"]["title"] = "Retorno acumulado no período selecionado (%)"
+        layout["margin"] = dict(l=60, r=20, t=60, b=50)
+        layout["template"] = "plotly_white"
+
+        botoes = []
+        for label, por_ticker in dados_por_janela.items():
+            xs = [por_ticker[ticker]["x"] for ticker in tickers]
+            ys = [por_ticker[ticker]["y"] for ticker in tickers]
+            textos = [por_ticker[ticker]["text"] for ticker in tickers]
+            botoes.append(dict(label=label, method="update", args=[{"x": xs, "y": ys, "text": textos}]))
+        layout["updatemenus"] = [dict(
+            type="buttons", direction="right", buttons=botoes,
+            x=0, y=1.2, xanchor="left", yanchor="top", showactive=True,
+            active=list(dados_por_janela.keys()).index(JANELA_INICIAL),
+        )]
+
+    fig.update_layout(**layout)
     return fig
 
 
-def gerar_grafico(tickers: list = None) -> go.Figure:
+def gerar_grafico(tickers: list = None, modo_standalone: bool = True) -> go.Figure:
     """Função de conveniência: carrega os preços brutos e monta o gráfico em uma chamada."""
     precos = carregar_precos_do_banco(tickers)
-    return construir_grafico_comparativo(precos)
+    return construir_grafico_comparativo(precos, modo_standalone=modo_standalone)
 
 
 DIV_ID_GRAFICO = "grafico-comparativo-retorno"

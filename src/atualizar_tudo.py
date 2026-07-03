@@ -3,7 +3,8 @@ Atualização diária completa do pipeline
 ==========================================
 Executa em sequência: extração de dados (preço sempre; fundamentos só se
 saiu resultado novo, ver data_fetch.precisa_atualizar_fundamentos) ->
-Excel de DCF por ação -> comps analysis -> gráfico comparativo de retorno.
+Excel de DCF por ação -> comps analysis -> gráfico comparativo de retorno ->
+dashboard.html (site estático consolidado, ver dashboard_export.py).
 
 Pensado para rodar automaticamente todo dia via launchd (macOS) — ver
 scripts/atualizar_diario.sh e scripts/com.valuation-dashboard.diario.plist.
@@ -22,6 +23,7 @@ from . import data_fetch
 from . import valuation_export
 from . import comps_analysis
 from . import returns_chart
+from . import dashboard_export
 from . import config
 
 
@@ -30,18 +32,24 @@ def atualizar_tudo() -> bool:
     print(f"=== Atualização iniciada em {inicio.isoformat()} ===")
 
     try:
-        print("1/4 - Buscando preços e fundamentos (yfinance -> SQLite)...")
+        print("1/6 - Buscando preços e fundamentos (yfinance -> SQLite)...")
         data_fetch.buscar_todas_as_empresas()
 
-        print("2/4 - Gerando Excel de DCF por ação em /valuations...")
+        print(f"2/6 - Buscando benchmark ({config.TICKER_BENCHMARK} / {config.NOME_BENCHMARK})...")
+        data_fetch.baixar_benchmark()
+
+        print("3/6 - Gerando Excel de DCF por ação em /valuations...")
         valuation_export.gerar_todos()
 
-        print("3/4 - Gerando comps_analysis.xlsx...")
+        print("4/6 - Gerando comps_analysis.xlsx...")
         comps_analysis.gerar_comps_analysis()
 
-        print("4/4 - Gerando grafico_comparativo.html...")
+        print("5/6 - Gerando grafico_comparativo.html...")
         fig = returns_chart.gerar_grafico()
         returns_chart.salvar_grafico_html(fig, f"{config.DIR_RAIZ}/grafico_comparativo.html")
+
+        print("6/6 - Gerando dashboard.html...")
+        dashboard_export.gerar_e_salvar()
 
         fim = datetime.now()
         print(f"=== Atualização concluída em {fim.isoformat()} (duração: {fim - inicio}) ===")
