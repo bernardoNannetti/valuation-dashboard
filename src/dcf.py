@@ -138,12 +138,20 @@ def calcular_wacc(conn, ticker: str) -> dict:
     taxa_imposto = taxa_imposto_efetiva(conn, ticker)
     custo_divida_pos_imposto = custo_divida_pre_imposto * (1 - taxa_imposto)
 
-    # Valor de mercado do equity = preço atual × ações em circulação, em vez
-    # do market_cap salvo em `empresas` (que só é atualizado quando os
-    # fundamentos são rebuscados). Isso mantém o peso do WACC reagindo ao
-    # preço de todo dia, mesmo quando os fundamentos ficam em cache entre
-    # divulgações de resultado (ver precisa_atualizar_fundamentos).
-    valor_equity = preco_atual(conn, ticker) * empresa["shares_outstanding"]
+    # Valor de mercado do equity: escala o último market_cap conhecido pela
+    # variação de preço desde o cadastro, em vez de recalcular via preço ×
+    # ações em circulação. Descoberto testando o comps-analysis: para
+    # empresas com múltiplas classes de ação (ex: GOOGL/GOOG da Alphabet),
+    # `shares_outstanding` do ticker só conta UMA classe, então preço×ações
+    # subestimava o market cap da GOOGL pela metade. Escalar o market_cap já
+    # correto (que o yfinance calcula somando todas as classes) pela razão
+    # de preço evita esse problema e ainda mantém o peso reagindo ao preço
+    # do dia entre uma atualização de fundamentos e outra.
+    preco_hoje = preco_atual(conn, ticker)
+    if empresa.get("preco_no_cadastro"):
+        valor_equity = empresa["market_cap"] * (preco_hoje / empresa["preco_no_cadastro"])
+    else:
+        valor_equity = empresa["market_cap"]
     valor_total = valor_equity + divida_total
     peso_equity = valor_equity / valor_total
     peso_divida = divida_total / valor_total
@@ -206,6 +214,65 @@ def percentual_medio_da_receita(conn, ticker: str, demonstrativo: str, item: str
     return float(razao.mean()) if not razao.empty else 0.0
 
 
+def projetar_percentual_com_fade(percentual_ano1: float, percentual_final: float, anos: int,
+                                   anos_fade: int = None) -> list:
+    """
+    Interpola linearmente um percentual (ex: CapEx % da receita) do valor do
+    ano 1 até o valor final, completando a transição em `anos_fade` anos
+    (não necessariamente o horizonte inteiro) — os anos restantes ficam
+    constantes em `percentual_final`.
+
+    Por quê um fade CURTO (não ao longo de todo o horizonte)? Testamos fazer
+    o fade ao longo dos 5-10 anos inteiros e piorou o resultado da AMZN: como
+    a interpolação é linear, esticar o horizonte só mantém o capex elevado
+    por mais tempo antes de normalizar. Guidance pública de capex só é
+    confiável para ~1-2 anos à frente mesmo — não temos base real para supor
+    uma trajetória de 5-10 anos, então é mais honesto assumir uma
+    normalização rápida (config.ANOS_FADE_CAPEX) e manter a média histórica
+    depois disso, em vez de inventar um "meio-termo" sem fundamento.
+    """
+    if anos_fade is None:
+        anos_fade = anos
+    anos_fade = max(1, min(anos_fade, anos))
+
+    valores = []
+    for ano in range(anos):
+        if ano >= anos_fade - 1:
+            valores.append(percentual_final)
+        else:
+            valores.append(
+                percentual_ano1 + (percentual_final - percentual_ano1) * ano / (anos_fade - 1)
+            )
+    return valores
+
+
+def pct_capex_ano1(conn, ticker: str, pct_capex_historico: float) -> float:
+    """
+    CapEx % da receita para o ano 1 da projeção. Usa a guidance pública de
+    capex (config.CAPEX_GUIDANCE_ANO1_USD) quando disponível, convertida
+    para % da receita mais recente; senão, cai para a média histórica
+    (ex: NVDA, que não guia capex da mesma forma que os hyperscalers).
+
+    O percentual implícito na guidance é limitado a
+    config.CAPEX_GUIDANCE_CAP_MULTIPLO × o CapEx% histórico (ver comentário
+    em config.py): sem esse teto, guidances desproporcionais em relação à
+    receita do último ano fechado (ex: MSFT implicava -67,4% da receita)
+    geravam um FCFF ano 1 tão negativo que dominava o valuation inteiro,
+    inclusive tornando o preço-alvo da AMZN negativo.
+    """
+    guidance_usd = config.CAPEX_GUIDANCE_ANO1_USD.get(ticker)
+    if guidance_usd is None:
+        return pct_capex_historico
+
+    receita_base = valor_mais_recente(conn, ticker, "financials", "Total Revenue")
+    if not receita_base:
+        return pct_capex_historico
+
+    pct_guidance = -(guidance_usd / receita_base)  # negativo = saída de caixa, mesma convenção do yfinance
+    limite = config.CAPEX_GUIDANCE_CAP_MULTIPLO * pct_capex_historico  # ambos negativos
+    return max(pct_guidance, limite)  # max entre negativos = o de menor magnitude
+
+
 def projetar_receita(receita_base: float, crescimento_ano1: float, anos: int, g_terminal: float) -> list:
     """
     Projeta a receita para `anos` anos à frente, com a taxa de crescimento
@@ -240,24 +307,39 @@ def calcular_dcf(ticker: str, conn=None) -> dict:
         wacc_info = calcular_wacc(conn, ticker)
         wacc = wacc_info["wacc"]
 
+        # Horizonte de projeção: 10 anos para empresas com choque de capex de
+        # IA muito acima do histórico (AMZN/MSFT/GOOGL, ver
+        # config.HORIZONTE_PROJECAO_POR_TICKER), 5 anos para as demais.
+        horizonte = config.HORIZONTE_PROJECAO_POR_TICKER.get(ticker, config.HORIZONTE_PROJECAO_ANOS)
+
         receita_base = valor_mais_recente(conn, ticker, "financials", "Total Revenue")
         margem_ebit = margem_ebit_historica(conn, ticker)
         pct_da = percentual_medio_da_receita(conn, ticker, "cashflow", "Depreciation Amortization Depletion")
-        pct_capex = percentual_medio_da_receita(conn, ticker, "cashflow", "Capital Expenditure")  # já negativo
+        pct_capex_hist = percentual_medio_da_receita(conn, ticker, "cashflow", "Capital Expenditure")  # já negativo
         pct_wc = percentual_medio_da_receita(conn, ticker, "cashflow", "Change In Working Capital")
         taxa_imposto = wacc_info["taxa_imposto_efetiva"]
 
         crescimento_ano1 = config.CRESCIMENTO_CONSENSO_ANO1.get(ticker, config.CRESCIMENTO_PERPETUIDADE)
         receitas_projetadas = projetar_receita(
-            receita_base, crescimento_ano1, config.HORIZONTE_PROJECAO_ANOS, config.CRESCIMENTO_PERPETUIDADE
+            receita_base, crescimento_ano1, horizonte, config.CRESCIMENTO_PERPETUIDADE
+        )
+
+        # CapEx: parte da guidance pública de investimento (ano 1) e faz fade
+        # até a média histórica (ver projetar_percentual_com_fade) — reflete
+        # o pico atual de investimento em IA nas 5 empresas com guidance
+        # divulgada (AAPL, MSFT, AMZN, GOOGL, TSM); NVDA usa média histórica
+        # nos dois pontos (sem guidance específica = sem fade).
+        pct_capex_inicial = pct_capex_ano1(conn, ticker, pct_capex_hist)
+        pcts_capex_projetados = projetar_percentual_com_fade(
+            pct_capex_inicial, pct_capex_hist, horizonte, anos_fade=config.ANOS_FADE_CAPEX
         )
 
         fcffs = []
-        for receita in receitas_projetadas:
+        for receita, pct_capex_ano in zip(receitas_projetadas, pcts_capex_projetados):
             ebit = receita * margem_ebit
             nopat = ebit * (1 - taxa_imposto)
             da = receita * pct_da
-            capex = receita * pct_capex      # pct_capex já vem negativo (saída de caixa)
+            capex = receita * pct_capex_ano  # já negativo (saída de caixa)
             variacao_wc = receita * pct_wc   # já no sinal de impacto de caixa (yfinance)
             fcff = nopat + da + capex + variacao_wc
             fcffs.append(fcff)
@@ -269,7 +351,7 @@ def calcular_dcf(ticker: str, conn=None) -> dict:
         # Valor terminal (Gordon Growth) a partir do último FCFF projetado
         fcff_terminal = fcffs[-1] * (1 + config.CRESCIMENTO_PERPETUIDADE)
         valor_terminal = fcff_terminal / (wacc - config.CRESCIMENTO_PERPETUIDADE)
-        valor_presente_terminal = valor_terminal / (1 + wacc) ** config.HORIZONTE_PROJECAO_ANOS
+        valor_presente_terminal = valor_terminal / (1 + wacc) ** horizonte
 
         valor_empresa = sum(valores_presentes_fcff) + valor_presente_terminal
 
@@ -300,11 +382,14 @@ def calcular_dcf(ticker: str, conn=None) -> dict:
             "wacc_detalhe": wacc_info,
             "margem_ebit": margem_ebit,
             "pct_da": pct_da,
-            "pct_capex": pct_capex,
+            "pct_capex_inicial": pct_capex_inicial,
+            "pct_capex_historico": pct_capex_hist,
+            "pcts_capex_projetados": pcts_capex_projetados,
             "pct_variacao_wc": pct_wc,
             "taxa_imposto_efetiva": taxa_imposto,
             "crescimento_ano1": crescimento_ano1,
             "crescimento_perpetuidade": config.CRESCIMENTO_PERPETUIDADE,
+            "horizonte_projecao_anos": horizonte,
             "receita_base": receita_base,
             "receitas_projetadas": receitas_projetadas,
             "fcffs_projetados": fcffs,

@@ -64,6 +64,76 @@ FX_FALLBACK_PARA_USD = {
 }
 
 # ---------------------------------------------------------------------------
+# Guidance de CapEx (gastos de capital) para o ano 1 da projeção
+# ---------------------------------------------------------------------------
+# Pesquisado em 03/07/2026: guidance pública de capex para 2026 de cada
+# empresa (anúncios de resultados / imprensa especializada), convertida para
+# % da receita (usando a receita mais recente disponível como base).
+#
+# CUIDADO / limitação conhecida: os números de "capex" divulgados pela
+# imprensa para big techs em 2026 muitas vezes somam capex em caixa (compra
+# de imobilizado, a linha 'Capital Expenditure' que puxamos do yfinance) +
+# infraestrutura financiada via leasing (que aparece em outras linhas do
+# fluxo de caixa). Ou seja, esse número tende a SUPERESTIMAR um pouco o
+# capex "em caixa" real. Para uma prova de conceito, ainda assim é a melhor
+# proxy pública disponível da intensidade de investimento de cada empresa.
+#
+# NVDA não está aqui de propósito: diferente das outras 5, a NVDA vende os
+# chips que alimentam esse boom de capex alheio — o capex PRÓPRIO dela é
+# pequeno e estável historicamente (ver dcf.py), então usamos a média
+# histórica normal para ela, sem guidance de "gastos" específica.
+#
+# Fontes: CNBC, Tom's Hardware, DataCenterDynamics, TrendForce, SCMP
+# (ver histórico da conversa/README para links completos).
+CAPEX_GUIDANCE_ANO1_USD = {
+    "AAPL": 14e9,     # guidance 2026 (bem mais conservadora que os pares)
+    "MSFT": 190e9,    # plano de capex calendário 2026 (revisado para cima)
+    "AMZN": 200e9,    # guidance 2026, majoritariamente infra de IA/AWS
+    "GOOGL": 185e9,   # topo do range revisado de $180-190bi para 2026
+    "TSM": 55e9,      # topo do range de $52-56bi para 2026 (já em USD)
+}
+
+# A partir do CapEx guiado no ano 1, o modelo faz um "fade" linear até a
+# média histórica de 2 anos (mesma lógica usada para crescimento de
+# receita) — ou seja, assume que esse pico de investimento em IA modera ao
+# longo do horizonte de projeção, em vez de ficar constante para sempre.
+
+# Teto para o CapEx% implícito na guidance, como múltiplo do CapEx% médio
+# histórico. Descoberto ao testar a Etapa 3: dividir a guidance em dólares
+# pela receita do último ano fechado gerava percentuais desproporcionais
+# (ex: MSFT -67,4% da receita, GOOGL -45,9%) — um único ano de CapEx tão
+# pesado gerava FCFF ano 1 fortemente negativo e chegou a tornar o
+# valuation da AMZN negativo (preço-alvo -$2,89, o que não existe na
+# prática). Limitar a guidance a, no máximo, 2x o CapEx% histórico evita
+# que um único ano domine o valuation inteiro, mantendo o sinal de "pico de
+# investimento acima do normal" sem deixá-lo implodir o modelo.
+CAPEX_GUIDANCE_CAP_MULTIPLO = 2.0
+
+# ---------------------------------------------------------------------------
+# Horizonte de projeção por empresa (override do padrão de 5 anos)
+# ---------------------------------------------------------------------------
+# Testamos estender AMZN/MSFT/GOOGL para 10 anos (nossa primeira tentativa
+# de corrigir o preço-alvo negativo da AMZN) e NÃO funcionou: como o fade de
+# capex é LINEAR ao longo de todo o horizonte, esticar o horizonte só
+# esticou o período com capex elevado por mais tempo, piorando a AMZN em vez
+# de melhorar. Revertido — ver ANOS_FADE_CAPEX abaixo para a correção real.
+# Deixamos o mecanismo de override pronto (dict vazio = todos usam
+# HORIZONTE_PROJECAO_ANOS) caso outra empresa precise de um horizonte
+# diferente no futuro por outro motivo.
+HORIZONTE_PROJECAO_POR_TICKER = {}
+
+# ---------------------------------------------------------------------------
+# Janela de normalização do CapEx (correção real do problema acima)
+# ---------------------------------------------------------------------------
+# Guidance pública de capex só é confiável para ~1-2 anos à frente (é o que
+# as empresas realmente comunicam nos calls de resultado). Não faz sentido
+# fingir que sabemos a trajetória de capex até o ano 5 ou 10 — então, em vez
+# de um fade lento ao longo de todo o horizonte, o CapEx guiado vale para o
+# ano 1, faz a transição até o ano ANOS_FADE_CAPEX, e a partir daí volta
+# para a média histórica (2 anos) pelo resto da projeção.
+ANOS_FADE_CAPEX = 2
+
+# ---------------------------------------------------------------------------
 # Janela de anos usada para médias históricas (margem EBIT, % D&A, % CapEx,
 # % variação de capital de giro). Descoberto durante o teste da Etapa 3: usar
 # TODO o histórico disponível (4-5 anos) distorce empresas com margem em

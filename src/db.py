@@ -68,6 +68,7 @@ def criar_schema():
                 beta REAL,
                 market_cap REAL,
                 shares_outstanding REAL,
+                preco_no_cadastro REAL,
                 atualizado_em TEXT,
                 ultima_divulgacao_resultado TEXT,
                 proxima_divulgacao_resultado TEXT
@@ -104,7 +105,7 @@ def criar_schema():
         # schema (sem as colunas de divulgação de resultado), adiciona agora.
         # SQLite não tem "ADD COLUMN IF NOT EXISTS" em todas as versões, então
         # tentamos e ignoramos o erro se a coluna já existir.
-        for coluna in ("ultima_divulgacao_resultado", "proxima_divulgacao_resultado"):
+        for coluna in ("ultima_divulgacao_resultado", "proxima_divulgacao_resultado", "preco_no_cadastro"):
             try:
                 conn.execute(f"ALTER TABLE empresas ADD COLUMN {coluna} TEXT")
             except sqlite3.OperationalError:
@@ -126,16 +127,17 @@ def salvar_empresa(conn, dados_empresa: dict):
     conn.execute("""
         INSERT INTO empresas
             (ticker, nome, setor, industria, descricao, beta,
-             market_cap, shares_outstanding, atualizado_em,
+             market_cap, shares_outstanding, preco_no_cadastro, atualizado_em,
              ultima_divulgacao_resultado, proxima_divulgacao_resultado)
         VALUES (:ticker, :nome, :setor, :industria, :descricao, :beta,
-                :market_cap, :shares_outstanding, :atualizado_em,
+                :market_cap, :shares_outstanding, :preco_no_cadastro, :atualizado_em,
                 :ultima_divulgacao_resultado, :proxima_divulgacao_resultado)
         ON CONFLICT(ticker) DO UPDATE SET
             nome=excluded.nome, setor=excluded.setor, industria=excluded.industria,
             descricao=excluded.descricao, beta=excluded.beta,
             market_cap=excluded.market_cap,
             shares_outstanding=excluded.shares_outstanding,
+            preco_no_cadastro=excluded.preco_no_cadastro,
             atualizado_em=excluded.atualizado_em,
             ultima_divulgacao_resultado=excluded.ultima_divulgacao_resultado,
             proxima_divulgacao_resultado=excluded.proxima_divulgacao_resultado

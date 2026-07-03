@@ -298,6 +298,7 @@ def buscar_todas_as_empresas(tickers: list[str] = config.TICKERS, forcar_atualiz
                 "beta": dados["info"]["beta"],
                 "market_cap": dados["info"]["market_cap"],
                 "shares_outstanding": dados["info"]["shares_outstanding"],
+                "preco_no_cadastro": dados["info"]["preco_atual"],
                 "atualizado_em": datetime.now(timezone.utc).isoformat(),
                 "ultima_divulgacao_resultado": dados["info"]["ultima_divulgacao_resultado"],
                 "proxima_divulgacao_resultado": dados["info"]["proxima_divulgacao_resultado"],
