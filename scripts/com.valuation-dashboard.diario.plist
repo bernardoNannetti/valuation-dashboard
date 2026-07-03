@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.valuation-dashboard.diario</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>~/Desktop/valuation-dashboard/scripts/atualizar_diario.sh</string>
+    </array>
+
+    <!-- Roda todo dia às 20:00 (horário local do Mac) — depois do
+         fechamento do mercado americano, garantindo preço de fechamento
+         do dia já disponível. Mude Hour/Minute se quiser outro horário. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>20</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/valuation-dashboard-diario.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/valuation-dashboard-diario-erro.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
