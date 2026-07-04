@@ -99,11 +99,19 @@ def gerar_excel_valuation(ticker: str, conn=None, pasta_saida: str = None) -> st
     linha = 4
     _secao(ws, linha, "RESUMO DO VALUATION", total_colunas)
     linha += 1
+    linha_preco_atual = linha
     _linha_dado(ws, linha, "Preço atual", r["preco_atual"], "$#,##0.00"); linha += 1
+    _linha_dado(ws, linha, "↳ preço de fechamento de", r.get("preco_atual_data") or "N/D"); linha += 1
+    linha_preco_alvo = linha
     _linha_dado(ws, linha, "Preço-alvo (DCF)", r["preco_alvo"], "$#,##0.00"); linha += 1
     linha_upside = linha
+    # Referencia as linhas por NÚMERO EXPLÍCITO (não por offset relativo tipo
+    # "linha-1"/"linha-2") — já tomamos um susto com isso antes (fórmula do
+    # "Valor do equity" mais abaixo ficou autorreferenciada num bug real
+    # deste projeto, por causa de um offset errado). Inserir a linha de
+    # "preço de fechamento de" acima quebraria um cálculo por offset aqui.
     ws.cell(row=linha, column=1, value="Upside / Downside").font = FONTE_LABEL
-    ws.cell(row=linha, column=2, value=f"=(B{linha-1}/B{linha-2})-1").number_format = "0.0%"
+    ws.cell(row=linha, column=2, value=f"=(B{linha_preco_alvo}/B{linha_preco_atual})-1").number_format = "0.0%"
     linha += 1
 
     cor_recomendacao = {"Compra": VERDE, "Venda": VERMELHO, "Neutro": CINZA_NEUTRO}.get(r["recomendacao"], CINZA_NEUTRO)
@@ -114,7 +122,12 @@ def gerar_excel_valuation(ticker: str, conn=None, pasta_saida: str = None) -> st
     _secao(ws, linha, "WACC (CAPM)", total_colunas)
     linha += 1
     _linha_dado(ws, linha, "Beta", round(w["beta"], 3)); linha += 1
+    fonte_rf = "ao vivo" if w["taxa_livre_de_risco_fonte"] == "ao_vivo" else "fallback (sem internet no momento do cálculo)"
     _linha_dado(ws, linha, "Taxa livre de risco (Treasury 10Y)", w["taxa_livre_de_risco"], "0.00%"); linha += 1
+    detalhe_rf = f"↳ fonte: {fonte_rf}"
+    if w["taxa_livre_de_risco_capturado_em"]:
+        detalhe_rf += f" (pregão de {w['taxa_livre_de_risco_capturado_em']})"
+    _linha_dado(ws, linha, detalhe_rf, ""); linha += 1
     _linha_dado(ws, linha, "Prêmio de risco de mercado (ERP, Damodaran)", w["premio_risco_mercado"], "0.00%"); linha += 1
     _linha_dado(ws, linha, "Custo do capital próprio (CAPM)", w["custo_capital_proprio"], "0.00%"); linha += 1
     _linha_dado(ws, linha, "Dívida total", w["divida_total"], "$#,##0"); linha += 1

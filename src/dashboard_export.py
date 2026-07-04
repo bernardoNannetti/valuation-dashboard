@@ -125,6 +125,7 @@ def _montar_linhas_recomendacao() -> tuple:
             "empresa": r["nome"],
             "setor": r["setor"],
             "precoAtual": round(r["preco_atual"], 2),
+            "precoAtualData": r.get("preco_atual_data"),
             "precoAlvo": round(r["preco_alvo"], 2),
             "upside": round(r["upside"], 4),
             "recomendacao": r["recomendacao"],
@@ -133,6 +134,8 @@ def _montar_linhas_recomendacao() -> tuple:
             "dcf": {
                 "beta": round(w["beta"], 3),
                 "rf": round(w["taxa_livre_de_risco"], 4),
+                "rfFonte": w["taxa_livre_de_risco_fonte"],
+                "rfCapturadoEm": w["taxa_livre_de_risco_capturado_em"],
                 "erp": round(w["premio_risco_mercado"], 4),
                 "custoEquity": round(w["custo_capital_proprio"], 4),
                 "custoDividaPosImposto": round(w["custo_divida_pos_imposto"], 4),
@@ -510,6 +513,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
     thead th, tbody td { padding: 10px 12px; }
     .detail-panel { padding: 16px 14px 18px 30px; grid-template-columns: 1fr; }
     .search-box input { width: 150px; }
+    .updated-pill { white-space: normal; line-height: 1.5; }
+    .refresh-popover { width: 260px; right: -60px; }
   }
   @media (max-width: 520px) {
     .kpi-grid { grid-template-columns: 1fr 1fr; }
@@ -547,16 +552,16 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <div class="updated-wrap">
         <div class="updated-pill">
           <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
-          Atualizado em <strong>__DATA_ATUALIZACAO__</strong>
+          Preços até <strong>__DATA_PRECO__</strong> · fundamentos <strong>__DATA_ATUALIZACAO__</strong>
           <button class="refresh-btn" id="botao-atualizar" title="Como atualizar os dados" aria-label="Como atualizar os dados">
             <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
           </button>
         </div>
         <div class="refresh-popover" id="popover-atualizar">
           <p><strong>Este dashboard é estático</strong> — não roda nenhum servidor por trás, então não consegue buscar dado novo sozinho ao clicar em algo.</p>
-          <p>Pra atualizar (preços, fundamentos, gráfico e esta página), rode no terminal (Claude Code, com acesso à internet):</p>
-          <pre id="comando-atualizar">cd ~/Desktop/valuation-dashboard &amp;&amp; python3 -m src.atualizar_tudo</pre>
-          <button class="copiar-btn" id="botao-copiar-comando">Copiar comando</button>
+          <p>Pra atualizar (preços, fundamentos, gráfico, esta página e publicar no GitHub), dê duplo-clique no arquivo abaixo, dentro da pasta do projeto:</p>
+          <pre id="arquivo-atualizar">Atualizar Dashboard.command</pre>
+          <p style="margin-top:-4px;">Uma janela de terminal abre sozinha, mostra o progresso e fecha quando você apertar Enter. Não precisa digitar comando nem abrir o Claude.</p>
         </div>
       </div>
       <button class="theme-toggle" id="botao-tema" title="Alternar tema" aria-label="Alternar tema claro/escuro"></button>
@@ -763,7 +768,9 @@ function detalheHTML(item) {
     '<tr class="linha-detalhe" data-detalhe-de="' + item.ticker + '"><td colspan="9"><div class="detail-panel">' +
       '<div class="detail-block"><h4>WACC (CAPM)</h4>' +
         '<div class="detail-row-item"><span class="lbl">Beta</span><span class="val">' + d.beta.toFixed(2) + '</span></div>' +
-        '<div class="detail-row-item"><span class="lbl">Taxa livre de risco</span><span class="val">' + fmtPctPlain(d.rf) + '</span></div>' +
+        '<div class="detail-row-item"><span class="lbl">Taxa livre de risco</span><span class="val">' + fmtPctPlain(d.rf) +
+          ' <span class="lbl" style="font-family:inherit;">(' + (d.rfFonte === 'ao_vivo' ? ('ao vivo, ' + d.rfCapturadoEm) : 'fallback') + ')</span>' +
+        '</span></div>' +
         '<div class="detail-row-item"><span class="lbl">Prêmio de risco (ERP)</span><span class="val">' + fmtPctPlain(d.erp) + '</span></div>' +
         '<div class="detail-row-item"><span class="lbl">Custo do equity</span><span class="val">' + fmtPctPlain(d.custoEquity) + '</span></div>' +
         '<div class="detail-row-item"><span class="lbl">Custo da dívida (pós-imp.)</span><span class="val">' + fmtPctPlain(d.custoDividaPosImposto) + '</span></div>' +
@@ -805,7 +812,7 @@ function linhaHTML(item, maxAbsUpside) {
         '<div class="empresa-nome">' + item.empresa + '</div></div>' +
       '</div></td>' +
       '<td class="num-cell">' + item.setor + '</td>' +
-      '<td class="num-cell mono">' + fmtUSD(item.precoAtual) + '</td>' +
+      '<td class="num-cell mono" title="Fechamento de ' + (item.precoAtualData || 'N/D') + '">' + fmtUSD(item.precoAtual) + '</td>' +
       '<td class="num-cell mono">' + fmtUSD(item.precoAlvo) + '</td>' +
       '<td class="upside-cell">' +
         '<div class="upside-track"><div class="upside-center"></div>' +
@@ -937,10 +944,10 @@ inputDataBase.addEventListener('change', () => recalcularComDataBase(inputDataBa
 // ---- Popover "como atualizar os dados" ---------------------------------
 // O dashboard é estático (sem servidor por trás), então não tem como um
 // clique aqui realmente rebuscar dados — isso só existe pra deixar claro
-// COMO atualizar (comando exato) sem precisar caçar isso na documentação.
+// COMO atualizar (duplo-clique no .command) sem precisar caçar isso na
+// documentação nem digitar nada num terminal.
 const botaoAtualizar = document.getElementById('botao-atualizar');
 const popoverAtualizar = document.getElementById('popover-atualizar');
-const botaoCopiar = document.getElementById('botao-copiar-comando');
 
 botaoAtualizar.addEventListener('click', (evento) => {
   evento.stopPropagation();
@@ -955,23 +962,6 @@ document.addEventListener('click', (evento) => {
 
 document.addEventListener('keydown', (evento) => {
   if (evento.key === 'Escape') popoverAtualizar.classList.remove('aberto');
-});
-
-botaoCopiar.addEventListener('click', () => {
-  const comando = document.getElementById('comando-atualizar').textContent;
-  const marcarComoCopiado = () => {
-    const textoOriginal = botaoCopiar.textContent;
-    botaoCopiar.textContent = 'Copiado!';
-    botaoCopiar.classList.add('copiado');
-    setTimeout(() => { botaoCopiar.textContent = textoOriginal; botaoCopiar.classList.remove('copiado'); }, 1800);
-  };
-  // Clipboard API pode falhar silenciosamente em páginas abertas via
-  // file:// (sem contexto seguro) dependendo do navegador — nesse caso o
-  // comando já está visível e selecionável no <pre> acima, então o usuário
-  // sempre consegue copiar manualmente mesmo se isso não funcionar.
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(comando).then(marcarComoCopiado).catch(() => {});
-  }
 });
 </script>
 </body>
@@ -1011,6 +1001,15 @@ def gerar_dashboard_html() -> str:
         for m in linhas_earnings
     )
 
+    # "Atualizado em" no header mistura DUAS datas que não são a mesma
+    # coisa: `atualizado_em` (quando os FUNDAMENTOS — financials/balance/
+    # cashflow — foram buscados, só muda ~4x/ano por ticker, ver
+    # data_fetch.precisa_atualizar_fundamentos) e a data do último PREÇO de
+    # fechamento (muda todo dia útil, sempre que o pipeline roda). Achado
+    # relatado pelo usuário: como o preço geralmente é do fechamento de
+    # ONTEM (o pipeline roda antes do fechamento de hoje), essas duas datas
+    # quase nunca coincidem — mostrar só uma dava a impressão errada de que
+    # a outra estava desatualizada. Agora mostramos as duas, explícitas.
     datas_atualizacao = [m["atualizado_em"] for m in metadados if m.get("atualizado_em")]
     if datas_atualizacao:
         data_mais_recente = max(datas_atualizacao)
@@ -1021,8 +1020,12 @@ def gerar_dashboard_html() -> str:
     else:
         data_atualizacao_fmt = "—"
 
+    datas_preco = [l["precoAtualData"] for l in linhas if l.get("precoAtualData")]
+    data_preco_fmt = _fmt_data_br(max(datas_preco)) if datas_preco else "—"
+
     html = _TEMPLATE
     html = html.replace("__DATA_ATUALIZACAO__", data_atualizacao_fmt)
+    html = html.replace("__DATA_PRECO__", data_preco_fmt)
     html = html.replace("__LINHAS_EARNINGS__", html_earnings)
     html = html.replace("__KPI_TOTAL__", str(total))
     html = html.replace("__KPI_COMPRA__", str(n_compra))
