@@ -327,6 +327,32 @@ _TEMPLATE = r"""<!DOCTYPE html>
   }
   .updated-pill svg { width: 15px; height: 15px; stroke: var(--accent); }
   .updated-pill strong { color: var(--text-1); font-weight: 600; }
+  .updated-wrap { position: relative; }
+  .refresh-btn {
+    display: flex; align-items: center; justify-content: center; border: none; background: transparent;
+    cursor: pointer; padding: 2px; margin-left: 2px; border-radius: 999px; transition: background .15s;
+  }
+  .refresh-btn:hover { background: var(--surface-2); }
+  .refresh-btn svg { width: 14px; height: 14px; stroke: var(--text-3); }
+  .refresh-popover {
+    display: none; position: absolute; top: calc(100% + 10px); right: 0; z-index: 20;
+    width: 320px; background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: var(--shadow-md); padding: 16px 18px;
+  }
+  .refresh-popover.aberto { display: block; }
+  .refresh-popover p { font-size: 12.5px; color: var(--text-2); line-height: 1.55; margin: 0 0 10px; }
+  .refresh-popover p strong { color: var(--text-1); }
+  .refresh-popover pre {
+    font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-1);
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; margin: 0 0 10px; white-space: pre-wrap; word-break: break-all;
+  }
+  .copiar-btn {
+    width: 100%; font: 600 12.5px 'Inter', sans-serif; color: var(--accent); background: var(--action-bg);
+    border: 1px solid var(--action-bd); border-radius: 8px; padding: 8px; cursor: pointer; transition: background .12s;
+  }
+  .copiar-btn:hover { background: var(--action-hover); }
+  .copiar-btn.copiado { color: var(--green-tx); background: var(--green-bg); border-color: var(--green-bd); }
   .theme-toggle {
     width: 38px; height: 38px; border-radius: 999px; background: var(--card); border: 1px solid var(--border);
     display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: var(--shadow-sm);
@@ -493,7 +519,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
   @media print {
     html, body { background: #fff !important; }
-    .theme-toggle, .search-box, .action-btn, thead th svg, .chart-toolbar { display: none !important; }
+    .theme-toggle, .search-box, .action-btn, thead th svg, .chart-toolbar, .refresh-btn, .refresh-popover { display: none !important; }
     .wrap { max-width: 100% !important; padding: 10px !important; }
     .card { box-shadow: none !important; border: 1px solid #ddd !important; break-inside: avoid; }
     .kpi-card { box-shadow: none !important; border: 1px solid #ddd !important; }
@@ -518,9 +544,20 @@ _TEMPLATE = r"""<!DOCTYPE html>
       </div>
     </div>
     <div class="header-right">
-      <div class="updated-pill">
-        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
-        Atualizado em <strong>__DATA_ATUALIZACAO__</strong>
+      <div class="updated-wrap">
+        <div class="updated-pill">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+          Atualizado em <strong>__DATA_ATUALIZACAO__</strong>
+          <button class="refresh-btn" id="botao-atualizar" title="Como atualizar os dados" aria-label="Como atualizar os dados">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+          </button>
+        </div>
+        <div class="refresh-popover" id="popover-atualizar">
+          <p><strong>Este dashboard é estático</strong> — não roda nenhum servidor por trás, então não consegue buscar dado novo sozinho ao clicar em algo.</p>
+          <p>Pra atualizar (preços, fundamentos, gráfico e esta página), rode no terminal (Claude Code, com acesso à internet):</p>
+          <pre id="comando-atualizar">cd ~/Desktop/valuation-dashboard &amp;&amp; python3 -m src.atualizar_tudo</pre>
+          <button class="copiar-btn" id="botao-copiar-comando">Copiar comando</button>
+        </div>
       </div>
       <button class="theme-toggle" id="botao-tema" title="Alternar tema" aria-label="Alternar tema claro/escuro"></button>
     </div>
@@ -896,6 +933,46 @@ function recalcularComDataBase(dataEscolhida) {
 }
 
 inputDataBase.addEventListener('change', () => recalcularComDataBase(inputDataBase.value));
+
+// ---- Popover "como atualizar os dados" ---------------------------------
+// O dashboard é estático (sem servidor por trás), então não tem como um
+// clique aqui realmente rebuscar dados — isso só existe pra deixar claro
+// COMO atualizar (comando exato) sem precisar caçar isso na documentação.
+const botaoAtualizar = document.getElementById('botao-atualizar');
+const popoverAtualizar = document.getElementById('popover-atualizar');
+const botaoCopiar = document.getElementById('botao-copiar-comando');
+
+botaoAtualizar.addEventListener('click', (evento) => {
+  evento.stopPropagation();
+  popoverAtualizar.classList.toggle('aberto');
+});
+
+document.addEventListener('click', (evento) => {
+  if (!popoverAtualizar.contains(evento.target) && evento.target !== botaoAtualizar) {
+    popoverAtualizar.classList.remove('aberto');
+  }
+});
+
+document.addEventListener('keydown', (evento) => {
+  if (evento.key === 'Escape') popoverAtualizar.classList.remove('aberto');
+});
+
+botaoCopiar.addEventListener('click', () => {
+  const comando = document.getElementById('comando-atualizar').textContent;
+  const marcarComoCopiado = () => {
+    const textoOriginal = botaoCopiar.textContent;
+    botaoCopiar.textContent = 'Copiado!';
+    botaoCopiar.classList.add('copiado');
+    setTimeout(() => { botaoCopiar.textContent = textoOriginal; botaoCopiar.classList.remove('copiado'); }, 1800);
+  };
+  // Clipboard API pode falhar silenciosamente em páginas abertas via
+  // file:// (sem contexto seguro) dependendo do navegador — nesse caso o
+  // comando já está visível e selecionável no <pre> acima, então o usuário
+  // sempre consegue copiar manualmente mesmo se isso não funcionar.
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(comando).then(marcarComoCopiado).catch(() => {});
+  }
+});
 </script>
 </body>
 </html>
