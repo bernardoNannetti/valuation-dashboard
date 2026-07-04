@@ -52,6 +52,20 @@ def valor_mais_recente(conn, ticker: str, demonstrativo: str, item: str, default
     return float(serie.iloc[-1]) if not serie.empty else default
 
 
+def periodo_mais_recente(conn, ticker: str, demonstrativo: str, item: str, default=None):
+    """
+    Data do período (fim de exercício fiscal) do valor mais recente de um
+    item contábil — ex: '2025-09-30' para a receita da AAPL. Usado para
+    deixar explícito, no Excel e no dashboard, de QUAL demonstração
+    financeira (10-K/10-Q) os inputs do DCF vieram — importante pra
+    auditoria: cada empresa tem um fim de ano fiscal diferente (AAPL
+    fecha em setembro, MSFT em junho, NVDA em janeiro), então "o dado mais
+    recente" não é a mesma data-calendário pra todas.
+    """
+    serie = serie_por_periodo(conn, ticker, demonstrativo, item)
+    return str(serie.index[-1].date()) if not serie.empty else default
+
+
 def carregar_empresa(conn, ticker: str) -> dict:
     cur = conn.execute("SELECT * FROM empresas WHERE ticker = ?", (ticker,))
     colunas = [d[0] for d in cur.description]
@@ -321,6 +335,12 @@ def calcular_dcf(ticker: str, conn=None) -> dict:
         horizonte = config.HORIZONTE_PROJECAO_POR_TICKER.get(ticker, config.HORIZONTE_PROJECAO_ANOS)
 
         receita_base = valor_mais_recente(conn, ticker, "financials", "Total Revenue")
+        # Data do período fiscal (10-K/10-Q) de onde a receita-base veio —
+        # cada empresa fecha o ano fiscal numa data diferente (AAPL: set,
+        # MSFT: jun, NVDA: jan), então isso NÃO é a mesma data-calendário
+        # pra todas. Exposto no Excel/dashboard pra deixar claro "a partir
+        # de qual documento" o DCF está calculado (ver valuation_export.py).
+        receita_base_periodo = periodo_mais_recente(conn, ticker, "financials", "Total Revenue")
         margem_ebit = margem_ebit_historica(conn, ticker)
         pct_da = percentual_medio_da_receita(conn, ticker, "cashflow", "Depreciation Amortization Depletion")
         pct_capex_hist = percentual_medio_da_receita(conn, ticker, "cashflow", "Capital Expenditure")  # já negativo
@@ -399,6 +419,8 @@ def calcular_dcf(ticker: str, conn=None) -> dict:
             "crescimento_perpetuidade": config.CRESCIMENTO_PERPETUIDADE,
             "horizonte_projecao_anos": horizonte,
             "receita_base": receita_base,
+            "receita_base_periodo": receita_base_periodo,
+            "dados_atualizados_em": empresa.get("atualizado_em"),
             "receitas_projetadas": receitas_projetadas,
             "fcffs_projetados": fcffs,
             "valores_presentes_fcff": valores_presentes_fcff,

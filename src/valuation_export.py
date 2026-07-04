@@ -15,6 +15,7 @@ presentes, upside %) ficam como fórmula, para dar transparência de auditoria.
 """
 
 import sqlite3
+from datetime import datetime, timezone
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -83,8 +84,13 @@ def gerar_excel_valuation(ticker: str, conn=None, pasta_saida: str = None) -> st
     ws["A1"].fill = PatternFill("solid", fgColor=AZUL_ESCURO)
     ws["A1"].alignment = CENTRO
 
+    # Data de geração deste Excel (não confundir com a data do documento
+    # financeiro usado como base — essa vem à parte, na seção de premissas,
+    # ver "Receita base (período fiscal)" abaixo, porque cada empresa fecha
+    # o ano fiscal numa data diferente).
+    gerado_em = datetime.now(timezone.utc).strftime("%d/%m/%Y")
     ws.cell(row=2, column=1,
-            value=f"{r['setor']} / {r['industria']} | As of 03/07/2026 | Valores em USD, exceto preço por ação")
+            value=f"{r['setor']} / {r['industria']} | Gerado em {gerado_em} | Valores em USD, exceto preço por ação")
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=total_colunas)
     ws["A2"].alignment = CENTRO
     ws["A2"].font = Font(italic=True, size=9)
@@ -124,6 +130,8 @@ def gerar_excel_valuation(ticker: str, conn=None, pasta_saida: str = None) -> st
     linha += 1
     _linha_dado(ws, linha, "Horizonte de projeção explícita", f"{r['horizonte_projecao_anos']} anos"); linha += 1
     _linha_dado(ws, linha, "Receita base (mais recente)", r["receita_base"], "$#,##0"); linha += 1
+    _linha_dado(ws, linha, "↳ período fiscal do documento (10-K/10-Q)", r.get("receita_base_periodo") or "N/D"); linha += 1
+    _linha_dado(ws, linha, "↳ dados buscados do yfinance em", (r.get("dados_atualizados_em") or "N/D")[:10]); linha += 1
     _linha_dado(ws, linha, "Crescimento de receita — ano 1 (consenso)", r["crescimento_ano1"], "0.0%"); linha += 1
     _linha_dado(ws, linha, "Crescimento na perpetuidade (Gordon Growth)", r["crescimento_perpetuidade"], "0.0%"); linha += 1
     _linha_dado(ws, linha, "Margem EBIT (média histórica)", r["margem_ebit"], "0.0%"); linha += 1
