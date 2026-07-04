@@ -52,6 +52,20 @@ def valor_mais_recente(conn, ticker: str, demonstrativo: str, item: str, default
     return float(serie.iloc[-1]) if not serie.empty else default
 
 
+def periodo_mais_recente(conn, ticker: str, demonstrativo: str, item: str, default=None):
+    """
+    Data do período (fim de exercício fiscal) do valor mais recente de um
+    item contábil — ex: '2025-09-30' para a receita da AAPL. Usado para
+    deixar explícito, no Excel e no dashboard, de QUAL demonstração
+    financeira (10-K/10-Q) os inputs do DCF vieram — importante pra
+    auditoria: cada empresa tem um fim de ano fiscal diferente (AAPL
+    fecha em setembro, MSFT em junho, NVDA em janeiro), então "o dado mais
+    recente" não é a mesma data-calendário pra todas.
+    """
+    serie = serie_por_periodo(conn, ticker, demonstrativo, item)
+    return str(serie.index[-1].date()) if not serie.empty else default
+
+
 def carregar_empresa(conn, ticker: str) -> dict:
     cur = conn.execute("SELECT * FROM empresas WHERE ticker = ?", (ticker,))
     colunas = [d[0] for d in cur.description]
@@ -72,11 +86,25 @@ def preco_atual(conn, ticker: str) -> float:
     return float(linha[0])
 
 
+def data_preco_atual(conn, ticker: str) -> str:
+    """
+    Data do último preço de fechamento salvo (não confundir com
+    `empresas.atualizado_em`, que é quando os FUNDAMENTOS — não o preço —
+    foram buscados pela última vez; preço é atualizado numa cadência
+    diferente/mais frequente, ver data_fetch.buscar_todas_as_empresas).
+    """
+    cur = conn.execute("""
+        SELECT data FROM precos_historicos WHERE ticker = ? ORDER BY data DESC LIMIT 1
+    """, (ticker,))
+    linha = cur.fetchone()
+    return linha[0] if linha else None
+
+
 # ---------------------------------------------------------------------------
 # WACC
 # ---------------------------------------------------------------------------
 
-def taxa_livre_de_risco() -> float:
+def taxa_livre_de_risco() -> dict:
     """
     Busca o yield atual do Treasury 10Y (ticker ^TNX) ao vivo.
     O yfinance reporta o Close do ^TNX diretamente em pontos percentuais de
@@ -93,16 +121,31 @@ def taxa_livre_de_risco() -> float:
 
     Se não houver conexão com a internet (ex: ambiente sandboxed sem acesso
     a APIs financeiras), cai para o valor de referência salvo em config.
+
+    Retorna um dict (não só o número) com `fonte` ("ao_vivo" | "fallback") e
+    `capturado_em` (data do próprio pregão do Treasury, quando ao vivo) —
+    sem isso, não tinha como o Excel/dashboard mostrarem se o WACC exibido
+    usou o yield de verdade daquele dia ou a constante fixa de config.py
+    (que fica desatualizada com o tempo). Ver valuation_export.py e
+    dashboard_export.py.
     """
     try:
         historico = yf.Ticker(config.TICKER_TAXA_LIVRE_DE_RISCO).history(period="5d")
         if historico.empty:
             raise ValueError("histórico vazio")
-        return float(historico["Close"].iloc[-1]) / 100
+        return {
+            "valor": float(historico["Close"].iloc[-1]) / 100,
+            "fonte": "ao_vivo",
+            "capturado_em": str(historico.index[-1].date()),
+        }
     except Exception as erro:
         print(f"[aviso] Não foi possível buscar Treasury 10Y ao vivo ({erro}). "
               f"Usando fallback: {config.TAXA_LIVRE_DE_RISCO_FALLBACK:.2%}")
-        return config.TAXA_LIVRE_DE_RISCO_FALLBACK
+        return {
+            "valor": config.TAXA_LIVRE_DE_RISCO_FALLBACK,
+            "fonte": "fallback",
+            "capturado_em": None,
+        }
 
 
 def taxa_imposto_efetiva(conn, ticker: str) -> float:
@@ -136,7 +179,8 @@ def calcular_wacc(conn, ticker: str) -> dict:
     empresa = carregar_empresa(conn, ticker)
     beta = empresa["beta"] or 1.0
 
-    rf = taxa_livre_de_risco()
+    rf_info = taxa_livre_de_risco()
+    rf = rf_info["valor"]
     custo_capital_proprio = rf + beta * config.PREMIO_RISCO_MERCADO
 
     divida_total = valor_mais_recente(conn, ticker, "balance_sheet", "Total Debt", default=0.0) or 0.0
@@ -169,6 +213,8 @@ def calcular_wacc(conn, ticker: str) -> dict:
     return {
         "beta": beta,
         "taxa_livre_de_risco": rf,
+        "taxa_livre_de_risco_fonte": rf_info["fonte"],
+        "taxa_livre_de_risco_capturado_em": rf_info["capturado_em"],
         "premio_risco_mercado": config.PREMIO_RISCO_MERCADO,
         "custo_capital_proprio": custo_capital_proprio,
         "divida_total": divida_total,
@@ -321,6 +367,12 @@ def calcular_dcf(ticker: str, conn=None) -> dict:
         horizonte = config.HORIZONTE_PROJECAO_POR_TICKER.get(ticker, config.HORIZONTE_PROJECAO_ANOS)
 
         receita_base = valor_mais_recente(conn, ticker, "financials", "Total Revenue")
+        # Data do período fiscal (10-K/10-Q) de onde a receita-base veio —
+        # cada empresa fecha o ano fiscal numa data diferente (AAPL: set,
+        # MSFT: jun, NVDA: jan), então isso NÃO é a mesma data-calendário
+        # pra todas. Exposto no Excel/dashboard pra deixar claro "a partir
+        # de qual documento" o DCF está calculado (ver valuation_export.py).
+        receita_base_periodo = periodo_mais_recente(conn, ticker, "financials", "Total Revenue")
         margem_ebit = margem_ebit_historica(conn, ticker)
         pct_da = percentual_medio_da_receita(conn, ticker, "cashflow", "Depreciation Amortization Depletion")
         pct_capex_hist = percentual_medio_da_receita(conn, ticker, "cashflow", "Capital Expenditure")  # já negativo
@@ -373,6 +425,7 @@ def calcular_dcf(ticker: str, conn=None) -> dict:
         preco_alvo = valor_equity / empresa["shares_outstanding"]
 
         preco_atual_acao = preco_atual(conn, ticker)
+        preco_atual_data = data_preco_atual(conn, ticker)
         upside = (preco_alvo / preco_atual_acao) - 1
 
         if upside > config.THRESHOLD_COMPRA:
@@ -399,6 +452,8 @@ def calcular_dcf(ticker: str, conn=None) -> dict:
             "crescimento_perpetuidade": config.CRESCIMENTO_PERPETUIDADE,
             "horizonte_projecao_anos": horizonte,
             "receita_base": receita_base,
+            "receita_base_periodo": receita_base_periodo,
+            "dados_atualizados_em": empresa.get("atualizado_em"),
             "receitas_projetadas": receitas_projetadas,
             "fcffs_projetados": fcffs,
             "valores_presentes_fcff": valores_presentes_fcff,
@@ -410,6 +465,7 @@ def calcular_dcf(ticker: str, conn=None) -> dict:
             "shares_outstanding": empresa["shares_outstanding"],
             "preco_alvo": preco_alvo,
             "preco_atual": preco_atual_acao,
+            "preco_atual_data": preco_atual_data,
             "upside": upside,
             "recomendacao": recomendacao,
         }

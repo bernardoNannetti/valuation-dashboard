@@ -15,6 +15,7 @@ presentes, upside %) ficam como fórmula, para dar transparência de auditoria.
 """
 
 import sqlite3
+from datetime import datetime, timezone
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -83,8 +84,13 @@ def gerar_excel_valuation(ticker: str, conn=None, pasta_saida: str = None) -> st
     ws["A1"].fill = PatternFill("solid", fgColor=AZUL_ESCURO)
     ws["A1"].alignment = CENTRO
 
+    # Data de geração deste Excel (não confundir com a data do documento
+    # financeiro usado como base — essa vem à parte, na seção de premissas,
+    # ver "Receita base (período fiscal)" abaixo, porque cada empresa fecha
+    # o ano fiscal numa data diferente).
+    gerado_em = datetime.now(timezone.utc).strftime("%d/%m/%Y")
     ws.cell(row=2, column=1,
-            value=f"{r['setor']} / {r['industria']} | As of 03/07/2026 | Valores em USD, exceto preço por ação")
+            value=f"{r['setor']} / {r['industria']} | Gerado em {gerado_em} | Valores em USD, exceto preço por ação")
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=total_colunas)
     ws["A2"].alignment = CENTRO
     ws["A2"].font = Font(italic=True, size=9)
@@ -93,11 +99,19 @@ def gerar_excel_valuation(ticker: str, conn=None, pasta_saida: str = None) -> st
     linha = 4
     _secao(ws, linha, "RESUMO DO VALUATION", total_colunas)
     linha += 1
+    linha_preco_atual = linha
     _linha_dado(ws, linha, "Preço atual", r["preco_atual"], "$#,##0.00"); linha += 1
+    _linha_dado(ws, linha, "↳ preço de fechamento de", r.get("preco_atual_data") or "N/D"); linha += 1
+    linha_preco_alvo = linha
     _linha_dado(ws, linha, "Preço-alvo (DCF)", r["preco_alvo"], "$#,##0.00"); linha += 1
     linha_upside = linha
+    # Referencia as linhas por NÚMERO EXPLÍCITO (não por offset relativo tipo
+    # "linha-1"/"linha-2") — já tomamos um susto com isso antes (fórmula do
+    # "Valor do equity" mais abaixo ficou autorreferenciada num bug real
+    # deste projeto, por causa de um offset errado). Inserir a linha de
+    # "preço de fechamento de" acima quebraria um cálculo por offset aqui.
     ws.cell(row=linha, column=1, value="Upside / Downside").font = FONTE_LABEL
-    ws.cell(row=linha, column=2, value=f"=(B{linha-1}/B{linha-2})-1").number_format = "0.0%"
+    ws.cell(row=linha, column=2, value=f"=(B{linha_preco_alvo}/B{linha_preco_atual})-1").number_format = "0.0%"
     linha += 1
 
     cor_recomendacao = {"Compra": VERDE, "Venda": VERMELHO, "Neutro": CINZA_NEUTRO}.get(r["recomendacao"], CINZA_NEUTRO)
@@ -108,7 +122,12 @@ def gerar_excel_valuation(ticker: str, conn=None, pasta_saida: str = None) -> st
     _secao(ws, linha, "WACC (CAPM)", total_colunas)
     linha += 1
     _linha_dado(ws, linha, "Beta", round(w["beta"], 3)); linha += 1
+    fonte_rf = "ao vivo" if w["taxa_livre_de_risco_fonte"] == "ao_vivo" else "fallback (sem internet no momento do cálculo)"
     _linha_dado(ws, linha, "Taxa livre de risco (Treasury 10Y)", w["taxa_livre_de_risco"], "0.00%"); linha += 1
+    detalhe_rf = f"↳ fonte: {fonte_rf}"
+    if w["taxa_livre_de_risco_capturado_em"]:
+        detalhe_rf += f" (pregão de {w['taxa_livre_de_risco_capturado_em']})"
+    _linha_dado(ws, linha, detalhe_rf, ""); linha += 1
     _linha_dado(ws, linha, "Prêmio de risco de mercado (ERP, Damodaran)", w["premio_risco_mercado"], "0.00%"); linha += 1
     _linha_dado(ws, linha, "Custo do capital próprio (CAPM)", w["custo_capital_proprio"], "0.00%"); linha += 1
     _linha_dado(ws, linha, "Dívida total", w["divida_total"], "$#,##0"); linha += 1
@@ -124,6 +143,8 @@ def gerar_excel_valuation(ticker: str, conn=None, pasta_saida: str = None) -> st
     linha += 1
     _linha_dado(ws, linha, "Horizonte de projeção explícita", f"{r['horizonte_projecao_anos']} anos"); linha += 1
     _linha_dado(ws, linha, "Receita base (mais recente)", r["receita_base"], "$#,##0"); linha += 1
+    _linha_dado(ws, linha, "↳ período fiscal do documento (10-K/10-Q)", r.get("receita_base_periodo") or "N/D"); linha += 1
+    _linha_dado(ws, linha, "↳ dados buscados do yfinance em", (r.get("dados_atualizados_em") or "N/D")[:10]); linha += 1
     _linha_dado(ws, linha, "Crescimento de receita — ano 1 (consenso)", r["crescimento_ano1"], "0.0%"); linha += 1
     _linha_dado(ws, linha, "Crescimento na perpetuidade (Gordon Growth)", r["crescimento_perpetuidade"], "0.0%"); linha += 1
     _linha_dado(ws, linha, "Margem EBIT (média histórica)", r["margem_ebit"], "0.0%"); linha += 1

@@ -125,6 +125,7 @@ def _montar_linhas_recomendacao() -> tuple:
             "empresa": r["nome"],
             "setor": r["setor"],
             "precoAtual": round(r["preco_atual"], 2),
+            "precoAtualData": r.get("preco_atual_data"),
             "precoAlvo": round(r["preco_alvo"], 2),
             "upside": round(r["upside"], 4),
             "recomendacao": r["recomendacao"],
@@ -133,6 +134,8 @@ def _montar_linhas_recomendacao() -> tuple:
             "dcf": {
                 "beta": round(w["beta"], 3),
                 "rf": round(w["taxa_livre_de_risco"], 4),
+                "rfFonte": w["taxa_livre_de_risco_fonte"],
+                "rfCapturadoEm": w["taxa_livre_de_risco_capturado_em"],
                 "erp": round(w["premio_risco_mercado"], 4),
                 "custoEquity": round(w["custo_capital_proprio"], 4),
                 "custoDividaPosImposto": round(w["custo_divida_pos_imposto"], 4),
@@ -148,6 +151,8 @@ def _montar_linhas_recomendacao() -> tuple:
                 "crescimentoPerpetuidade": round(r["crescimento_perpetuidade"], 4),
                 "horizonte": r["horizonte_projecao_anos"],
                 "receitaBase": r["receita_base"],
+                "receitaBasePeriodo": r.get("receita_base_periodo"),
+                "dadosAtualizadosEm": (r.get("dados_atualizados_em") or "")[:10] or None,
                 "receitasProjetadas": [round(x, 0) for x in r["receitas_projetadas"]],
                 "fcffsProjetados": [round(x, 0) for x in r["fcffs_projetados"]],
                 "valorPresenteTerminal": round(r["valor_presente_terminal"], 0),
@@ -200,6 +205,33 @@ def _montar_dados_janelas_grafico() -> dict:
     """Dados pré-calculados por janela (YTD/12M/24M/36M), pros botões HTML customizados."""
     precos = returns_chart.carregar_precos_do_banco()
     return returns_chart.calcular_dados_por_janela(precos)
+
+
+def _montar_precos_brutos_grafico() -> tuple:
+    """
+    Preços BRUTOS (não normalizados) de cada ticker — usados pelo seletor de
+    'data-base personalizada' no gráfico: diferente dos botões YTD/12M/24M/
+    36M (janelas fixas, pré-calculadas em Python), a data-base customizada é
+    escolhida pelo usuário DEPOIS que a página já carregou, então o cálculo
+    de retorno (preço/preço_na_data_base - 1) tem que rodar em JS, no
+    navegador — por isso precisamos dos preços brutos (não só o retorno das
+    4 janelas fixas) disponíveis no HTML.
+
+    Retorna (dict_precos_por_ticker, data_minima, data_maxima) — as duas
+    últimas viram os limites do <input type="date"> (não faz sentido deixar
+    escolher uma data fora do histórico que baixamos).
+    """
+    precos = returns_chart.carregar_precos_do_banco()
+    dados = {}
+    for ticker in precos.columns:
+        serie = precos[ticker].dropna()
+        dados[ticker] = {
+            "x": [d.strftime("%Y-%m-%d") for d in serie.index],
+            "y": [round(float(v), 4) for v in serie.values],
+        }
+    data_min = precos.index.min().strftime("%Y-%m-%d")
+    data_max = precos.index.max().strftime("%Y-%m-%d")
+    return dados, data_min, data_max
 
 
 _TEMPLATE = r"""<!DOCTYPE html>
@@ -298,6 +330,32 @@ _TEMPLATE = r"""<!DOCTYPE html>
   }
   .updated-pill svg { width: 15px; height: 15px; stroke: var(--accent); }
   .updated-pill strong { color: var(--text-1); font-weight: 600; }
+  .updated-wrap { position: relative; }
+  .refresh-btn {
+    display: flex; align-items: center; justify-content: center; border: none; background: transparent;
+    cursor: pointer; padding: 2px; margin-left: 2px; border-radius: 999px; transition: background .15s;
+  }
+  .refresh-btn:hover { background: var(--surface-2); }
+  .refresh-btn svg { width: 14px; height: 14px; stroke: var(--text-3); }
+  .refresh-popover {
+    display: none; position: absolute; top: calc(100% + 10px); right: 0; z-index: 20;
+    width: 320px; background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: var(--shadow-md); padding: 16px 18px;
+  }
+  .refresh-popover.aberto { display: block; }
+  .refresh-popover p { font-size: 12.5px; color: var(--text-2); line-height: 1.55; margin: 0 0 10px; }
+  .refresh-popover p strong { color: var(--text-1); }
+  .refresh-popover pre {
+    font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-1);
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; margin: 0 0 10px; white-space: pre-wrap; word-break: break-all;
+  }
+  .copiar-btn {
+    width: 100%; font: 600 12.5px 'Inter', sans-serif; color: var(--accent); background: var(--action-bg);
+    border: 1px solid var(--action-bd); border-radius: 8px; padding: 8px; cursor: pointer; transition: background .12s;
+  }
+  .copiar-btn:hover { background: var(--action-hover); }
+  .copiar-btn.copiado { color: var(--green-tx); background: var(--green-bg); border-color: var(--green-bd); }
   .theme-toggle {
     width: 38px; height: 38px; border-radius: 999px; background: var(--card); border: 1px solid var(--border);
     display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: var(--shadow-sm);
@@ -419,7 +477,26 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .fcff-chip .val { display: block; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; margin-top: 2px; }
   .fcff-chip .val.pos { color: var(--green-tx); } .fcff-chip .val.neg { color: var(--red-tx); }
 
-  .chart-toolbar { padding: 0 24px 8px; }
+  .earnings-details summary {
+    cursor: pointer; padding: 20px 24px; list-style: none; position: relative;
+  }
+  .earnings-details summary::-webkit-details-marker { display: none; }
+  .earnings-details summary::after {
+    content: '▸'; position: absolute; right: 24px; top: 22px; color: var(--text-3);
+    transition: transform .15s ease; font-size: 13px;
+  }
+  .earnings-details[open] summary::after { transform: rotate(90deg); }
+  .earnings-details table th, .earnings-details table td { padding: 10px 24px; }
+
+  .chart-toolbar { padding: 0 24px 8px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .data-base-custom { display: flex; align-items: center; gap: 8px; }
+  .data-base-custom label { font-size: 12.5px; color: var(--text-2); }
+  .data-base-custom input[type="date"] {
+    font-family: inherit; font-size: 12.5px; padding: 6px 10px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--surface-1); color: var(--text-1); outline: none;
+  }
+  .data-base-custom input[type="date"]:focus { border-color: var(--accent); }
+  .data-base-custom input[type="date"].ativo { border-color: var(--accent); background: var(--blue-icon-bg); }
   .chart-wrap { padding: 4px 16px 20px; }
 
   .footer { margin-top: 8px; padding: 20px 4px 0; border-top: 1px solid var(--border); }
@@ -436,6 +513,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
     thead th, tbody td { padding: 10px 12px; }
     .detail-panel { padding: 16px 14px 18px 30px; grid-template-columns: 1fr; }
     .search-box input { width: 150px; }
+    .updated-pill { white-space: normal; line-height: 1.5; }
+    .refresh-popover { width: 260px; right: -60px; }
   }
   @media (max-width: 520px) {
     .kpi-grid { grid-template-columns: 1fr 1fr; }
@@ -445,7 +524,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
   @media print {
     html, body { background: #fff !important; }
-    .theme-toggle, .search-box, .action-btn, thead th svg, .chart-toolbar { display: none !important; }
+    .theme-toggle, .search-box, .action-btn, thead th svg, .chart-toolbar, .refresh-btn, .refresh-popover { display: none !important; }
     .wrap { max-width: 100% !important; padding: 10px !important; }
     .card { box-shadow: none !important; border: 1px solid #ddd !important; break-inside: avoid; }
     .kpi-card { box-shadow: none !important; border: 1px solid #ddd !important; }
@@ -470,9 +549,20 @@ _TEMPLATE = r"""<!DOCTYPE html>
       </div>
     </div>
     <div class="header-right">
-      <div class="updated-pill">
-        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
-        Atualizado em <strong>__DATA_ATUALIZACAO__</strong>
+      <div class="updated-wrap">
+        <div class="updated-pill">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+          Preços até <strong>__DATA_PRECO__</strong> · fundamentos <strong>__DATA_ATUALIZACAO__</strong>
+          <button class="refresh-btn" id="botao-atualizar" title="Como atualizar os dados" aria-label="Como atualizar os dados">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+          </button>
+        </div>
+        <div class="refresh-popover" id="popover-atualizar">
+          <p><strong>Este dashboard é estático</strong> — não roda nenhum servidor por trás, então não consegue buscar dado novo sozinho ao clicar em algo.</p>
+          <p>Pra atualizar (preços, fundamentos, gráfico, esta página e publicar no GitHub), dê duplo-clique no arquivo abaixo, dentro da pasta do projeto:</p>
+          <pre id="arquivo-atualizar">Atualizar Dashboard.command</pre>
+          <p style="margin-top:-4px;">Uma janela de terminal abre sozinha, mostra o progresso e fecha quando você apertar Enter. Não precisa digitar comando nem abrir o Claude.</p>
+        </div>
       </div>
       <button class="theme-toggle" id="botao-tema" title="Alternar tema" aria-label="Alternar tema claro/escuro"></button>
     </div>
@@ -532,6 +622,21 @@ _TEMPLATE = r"""<!DOCTYPE html>
   </div>
 
   <div class="card">
+    <details class="earnings-details">
+      <summary>
+        <h2 class="card-title">Datas de divulgação de resultado</h2>
+        <p class="card-subtitle">Última e próxima divulgação de cada empresa (calendário de earnings)</p>
+      </summary>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Ticker</th><th>Última divulgação</th><th>Próxima divulgação</th></tr></thead>
+          <tbody>__LINHAS_EARNINGS__</tbody>
+        </table>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
     <div class="card-header">
       <div>
         <h2 class="card-title">Retorno comparativo</h2>
@@ -544,6 +649,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <button data-janela="12M">12M</button>
         <button data-janela="24M">24M</button>
         <button data-janela="36M" class="active">36M</button>
+      </div>
+      <div class="data-base-custom">
+        <label for="data-base-input">ou data-base personalizada:</label>
+        <input type="date" id="data-base-input" min="__DATA_MIN__" max="__DATA_MAX__">
       </div>
     </div>
     <div class="chart-wrap">
@@ -564,6 +673,7 @@ const DADOS = __DADOS_JSON__;
 const STATS_GRUPO = __STATS_GRUPO_JSON__;
 const JANELAS_GRAFICO = __JANELAS_JSON__;
 const TICKERS_GRAFICO = __TICKERS_JSON__;
+const PRECOS_BRUTOS = __PRECOS_BRUTOS_JSON__;
 const CORES_BADGE = { "Compra": "compra", "Venda": "venda", "Neutro": "neutro" };
 
 function fmtUSD(v) {
@@ -658,7 +768,9 @@ function detalheHTML(item) {
     '<tr class="linha-detalhe" data-detalhe-de="' + item.ticker + '"><td colspan="9"><div class="detail-panel">' +
       '<div class="detail-block"><h4>WACC (CAPM)</h4>' +
         '<div class="detail-row-item"><span class="lbl">Beta</span><span class="val">' + d.beta.toFixed(2) + '</span></div>' +
-        '<div class="detail-row-item"><span class="lbl">Taxa livre de risco</span><span class="val">' + fmtPctPlain(d.rf) + '</span></div>' +
+        '<div class="detail-row-item"><span class="lbl">Taxa livre de risco</span><span class="val">' + fmtPctPlain(d.rf) +
+          ' <span class="lbl" style="font-family:inherit;">(' + (d.rfFonte === 'ao_vivo' ? ('ao vivo, ' + d.rfCapturadoEm) : 'fallback') + ')</span>' +
+        '</span></div>' +
         '<div class="detail-row-item"><span class="lbl">Prêmio de risco (ERP)</span><span class="val">' + fmtPctPlain(d.erp) + '</span></div>' +
         '<div class="detail-row-item"><span class="lbl">Custo do equity</span><span class="val">' + fmtPctPlain(d.custoEquity) + '</span></div>' +
         '<div class="detail-row-item"><span class="lbl">Custo da dívida (pós-imp.)</span><span class="val">' + fmtPctPlain(d.custoDividaPosImposto) + '</span></div>' +
@@ -673,7 +785,10 @@ function detalheHTML(item) {
         '<div class="detail-row-item"><span class="lbl">Taxa de imposto efetiva</span><span class="val">' + fmtPctPlain(d.taxaImposto) + '</span></div>' +
         '<div class="detail-row-item"><span class="lbl">Horizonte de projeção</span><span class="val">' + d.horizonte + ' anos</span></div>' +
         '<div class="fcff-strip">' + fcffStrip + '</div>' +
-        '<p class="detail-note">FCFF projetado por ano (bilhões de US$), horizonte explícito.</p>' +
+        '<p class="detail-note">FCFF projetado por ano (bilhões de US$), horizonte explícito. ' +
+          'Receita-base do 10-K/10-Q com período fiscal encerrado em <strong>' + (d.receitaBasePeriodo || 'N/D') + '</strong>' +
+          (d.dadosAtualizadosEm ? (' · dados buscados do yfinance em ' + d.dadosAtualizadosEm) : '') + '.' +
+        '</p>' +
       '</div>' +
       compsRowHTML(item) +
     '</div></td></tr>';
@@ -697,7 +812,7 @@ function linhaHTML(item, maxAbsUpside) {
         '<div class="empresa-nome">' + item.empresa + '</div></div>' +
       '</div></td>' +
       '<td class="num-cell">' + item.setor + '</td>' +
-      '<td class="num-cell mono">' + fmtUSD(item.precoAtual) + '</td>' +
+      '<td class="num-cell mono" title="Fechamento de ' + (item.precoAtualData || 'N/D') + '">' + fmtUSD(item.precoAtual) + '</td>' +
       '<td class="num-cell mono">' + fmtUSD(item.precoAlvo) + '</td>' +
       '<td class="upside-cell">' +
         '<div class="upside-track"><div class="upside-center"></div>' +
@@ -769,6 +884,8 @@ document.getElementById('botao-tema').addEventListener('click', () => {
 aplicarTema(document.documentElement.getAttribute('data-theme') || 'light');
 
 // ---- Botões YTD/12M/24M/36M do gráfico (custom, no lugar dos nativos) --
+const inputDataBase = document.getElementById('data-base-input');
+
 document.querySelectorAll('#janela-toggle button').forEach(btn => {
   btn.addEventListener('click', () => {
     const janela = btn.dataset.janela;
@@ -780,7 +897,71 @@ document.querySelectorAll('#janela-toggle button').forEach(btn => {
     Plotly.update(document.getElementById('__DIV_ID_GRAFICO__'), { x: xs, y: ys, text: texts });
     document.querySelectorAll('#janela-toggle button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
+    // uma data-base custom e um preset de janela são mutuamente exclusivos
+    // (visualmente): escolher um preset limpa a data customizada.
+    inputDataBase.value = '';
+    inputDataBase.classList.remove('ativo');
   });
+});
+
+// ---- Data-base personalizada -------------------------------------------
+// Diferente das janelas YTD/12M/24M/36M (pré-calculadas em Python), aqui o
+// retorno é recalculado NO NAVEGADOR a partir dos preços brutos
+// (PRECOS_BRUTOS) — o usuário pode escolher literalmente qualquer dia do
+// histórico como o "dia 0" (base 100) da comparação.
+function fmtRetornoChart(v) {
+  const s = v.toFixed(2).replace('.', ',');
+  return (v >= 0 ? '+' : '') + s + '%';
+}
+
+function recalcularComDataBase(dataEscolhida) {
+  if (!dataEscolhida || typeof Plotly === 'undefined') return;
+
+  const xs = [], ys = [], texts = [];
+  TICKERS_GRAFICO.forEach(ticker => {
+    const serie = PRECOS_BRUTOS[ticker];
+    // primeiro pregão NA data escolhida ou depois dela (mesma lógica das
+    // janelas fixas: se cair num fim de semana/feriado, usa o próximo dia
+    // útil disponível).
+    const idxBase = serie.x.findIndex(d => d >= dataEscolhida);
+    if (idxBase === -1) { xs.push([]); ys.push([]); texts.push([]); return; }
+
+    const precoBase = serie.y[idxBase];
+    const xRecorte = serie.x.slice(idxBase);
+    const yRecorte = serie.y.slice(idxBase).map(preco => (preco / precoBase - 1) * 100);
+    xs.push(xRecorte);
+    ys.push(yRecorte);
+    texts.push(yRecorte.map(fmtRetornoChart));
+  });
+
+  Plotly.update(document.getElementById('__DIV_ID_GRAFICO__'), { x: xs, y: ys, text: texts });
+  document.querySelectorAll('#janela-toggle button').forEach(b => b.classList.remove('active'));
+  inputDataBase.classList.add('ativo');
+}
+
+inputDataBase.addEventListener('change', () => recalcularComDataBase(inputDataBase.value));
+
+// ---- Popover "como atualizar os dados" ---------------------------------
+// O dashboard é estático (sem servidor por trás), então não tem como um
+// clique aqui realmente rebuscar dados — isso só existe pra deixar claro
+// COMO atualizar (duplo-clique no .command) sem precisar caçar isso na
+// documentação nem digitar nada num terminal.
+const botaoAtualizar = document.getElementById('botao-atualizar');
+const popoverAtualizar = document.getElementById('popover-atualizar');
+
+botaoAtualizar.addEventListener('click', (evento) => {
+  evento.stopPropagation();
+  popoverAtualizar.classList.toggle('aberto');
+});
+
+document.addEventListener('click', (evento) => {
+  if (!popoverAtualizar.contains(evento.target) && evento.target !== botaoAtualizar) {
+    popoverAtualizar.classList.remove('aberto');
+  }
+});
+
+document.addEventListener('keydown', (evento) => {
+  if (evento.key === 'Escape') popoverAtualizar.classList.remove('aberto');
 });
 </script>
 </body>
@@ -792,6 +973,7 @@ def gerar_dashboard_html() -> str:
     linhas, stats_grupo = _montar_linhas_recomendacao()
     metadados = _montar_metadados()
     dados_janelas = _montar_dados_janelas_grafico()
+    precos_brutos, data_min, data_max = _montar_precos_brutos_grafico()
 
     total = len(linhas)
     n_compra = sum(1 for l in linhas if l["recomendacao"] == "Compra")
@@ -800,6 +982,34 @@ def gerar_dashboard_html() -> str:
     upside_medio = sum(l["upside"] for l in linhas) / total if total else 0.0
     wacc_medio = sum(l["wacc"] for l in linhas) / total if total else 0.0
 
+    def _fmt_data_br(valor):
+        if not valor:
+            return "—"
+        try:
+            return datetime.fromisoformat(valor).strftime("%d/%m/%Y")
+        except ValueError:
+            return valor
+
+    linhas_earnings = sorted(
+        (m for m in metadados if m["ticker"] != config.TICKER_BENCHMARK),
+        key=lambda m: m.get("proxima_divulgacao_resultado") or "9999-99-99",
+    )
+    html_earnings = "".join(
+        f"<tr><td class=\"num-cell mono\">{m['ticker']}</td>"
+        f"<td class=\"num-cell\">{_fmt_data_br(m.get('ultima_divulgacao_resultado'))}</td>"
+        f"<td class=\"num-cell\">{_fmt_data_br(m.get('proxima_divulgacao_resultado'))}</td></tr>"
+        for m in linhas_earnings
+    )
+
+    # "Atualizado em" no header mistura DUAS datas que não são a mesma
+    # coisa: `atualizado_em` (quando os FUNDAMENTOS — financials/balance/
+    # cashflow — foram buscados, só muda ~4x/ano por ticker, ver
+    # data_fetch.precisa_atualizar_fundamentos) e a data do último PREÇO de
+    # fechamento (muda todo dia útil, sempre que o pipeline roda). Achado
+    # relatado pelo usuário: como o preço geralmente é do fechamento de
+    # ONTEM (o pipeline roda antes do fechamento de hoje), essas duas datas
+    # quase nunca coincidem — mostrar só uma dava a impressão errada de que
+    # a outra estava desatualizada. Agora mostramos as duas, explícitas.
     datas_atualizacao = [m["atualizado_em"] for m in metadados if m.get("atualizado_em")]
     if datas_atualizacao:
         data_mais_recente = max(datas_atualizacao)
@@ -810,8 +1020,13 @@ def gerar_dashboard_html() -> str:
     else:
         data_atualizacao_fmt = "—"
 
+    datas_preco = [l["precoAtualData"] for l in linhas if l.get("precoAtualData")]
+    data_preco_fmt = _fmt_data_br(max(datas_preco)) if datas_preco else "—"
+
     html = _TEMPLATE
     html = html.replace("__DATA_ATUALIZACAO__", data_atualizacao_fmt)
+    html = html.replace("__DATA_PRECO__", data_preco_fmt)
+    html = html.replace("__LINHAS_EARNINGS__", html_earnings)
     html = html.replace("__KPI_TOTAL__", str(total))
     html = html.replace("__KPI_COMPRA__", str(n_compra))
     html = html.replace("__KPI_NEUTRO__", str(n_neutro))
@@ -830,6 +1045,9 @@ def gerar_dashboard_html() -> str:
         json.dumps(list(config.TICKERS) + [config.TICKER_BENCHMARK], ensure_ascii=False),
     )
     html = html.replace("__DIV_ID_GRAFICO__", returns_chart.DIV_ID_GRAFICO)
+    html = html.replace("__PRECOS_BRUTOS_JSON__", json.dumps(precos_brutos, ensure_ascii=False))
+    html = html.replace("__DATA_MIN__", data_min)
+    html = html.replace("__DATA_MAX__", data_max)
     html = html.replace("__GRAFICO_HTML__", _gerar_html_grafico())
     return html
 
